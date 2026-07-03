@@ -62,6 +62,9 @@ Deploy over Control Hub Wi-Fi ADB and start the Robot Controller app:
 If Android Studio prompts for a deploy target, use the Control Hub device at
 `192.168.43.1:5555`.
 
+For the underlying ADB commands used for FTC deployment and debugging, see
+`doc/ADB_TUTORIAL.md`.
+
 ### 4. Launch DanceBot
 
 Keep the Mac connected to `FTC-L3OE`, lift the robot or make sure it has room to
@@ -122,6 +125,9 @@ the wheels before running this diagnostic.
 
 This project is based on FTC SDK `v11.1`. The Driver Station app should be on
 the same FTC SDK major/minor release as the Robot Controller app you deploy.
+
+For a simple explanation of what the demo does and the FTC concepts it uses,
+see `doc/DANCEBOT_DEMO.md`.
 
 ## OnBot Java Mirror
 
