@@ -164,10 +164,12 @@ def main():
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-    except OSError:
-        pass
+    reuse_port = getattr(socket, "SO_REUSEPORT", None)
+    if reuse_port is not None:
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, reuse_port, 1)
+        except OSError:
+            pass
     sock.bind(("", LOCAL_PORT))
     sock.setblocking(False)
 

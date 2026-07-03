@@ -145,10 +145,12 @@ class RobocolClient:
         self.log = log_path.open("w", encoding="utf-8")
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        except OSError:
-            pass
+        reuse_port = getattr(socket, "SO_REUSEPORT", None)
+        if reuse_port is not None:
+            try:
+                self.sock.setsockopt(socket.SOL_SOCKET, reuse_port, 1)
+            except OSError:
+                pass
         self.sock.bind(("", LOCAL_PORT))
         self.sock.setblocking(False)
 
