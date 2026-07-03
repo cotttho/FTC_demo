@@ -15,10 +15,11 @@ FTC_HOST = os.environ.get("FTC_HOST", "192.168.43.1")
 ROBOCOL_PORT = int(os.environ.get("ROBOCOL_PORT", "20884"))
 LOCAL_PORT = int(os.environ.get("LOCAL_PORT", str(ROBOCOL_PORT)))
 STOP_OPMODE = os.environ.get("STOP_OPMODE", "$Stop$Robot$")
-SDK_BUILD_MONTH = int(os.environ.get("SDK_BUILD_MONTH", "9"))
-SDK_BUILD_YEAR = int(os.environ.get("SDK_BUILD_YEAR", "2022"))
-SDK_MAJOR_VERSION = int(os.environ.get("SDK_MAJOR_VERSION", "8"))
-SDK_MINOR_VERSION = int(os.environ.get("SDK_MINOR_VERSION", "0"))
+ROBOCOL_VERSION = int(os.environ.get("ROBOCOL_VERSION", "124"))
+SDK_BUILD_MONTH = int(os.environ.get("SDK_BUILD_MONTH", "1"))
+SDK_BUILD_YEAR = int(os.environ.get("SDK_BUILD_YEAR", "2026"))
+SDK_MAJOR_VERSION = int(os.environ.get("SDK_MAJOR_VERSION", "11"))
+SDK_MINOR_VERSION = int(os.environ.get("SDK_MINOR_VERSION", "1"))
 LOG_DIR = Path(os.environ.get("LOG_DIR", "reports"))
 
 MSG_TYPES = {
@@ -59,7 +60,7 @@ def build_command(name, extra="", seq=0, timestamp=None, acknowledged=False):
 
 def build_peer_discovery(seq=0):
     payload = (
-        bytes([123, 1])
+        bytes([ROBOCOL_VERSION & 0xFF, 1])
         + be_u16(seq)
         + bytes([SDK_BUILD_MONTH & 0xFF])
         + be_u16(SDK_BUILD_YEAR)

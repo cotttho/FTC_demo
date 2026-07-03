@@ -89,6 +89,10 @@ Tail the OpMode logs in another Android Studio Terminal tab if needed:
 ./logcat-ftc
 ```
 
+If the launcher times out and Logcat says `Incompatible robocol versions`, make
+sure the script is using the same FTC SDK generation as the installed Robot
+Controller app. This repo defaults to FTC SDK `11.1.0` / Robocol `124`.
+
 ### Launch Shortcut
 
 After manually connecting to the Control Hub Wi-Fi, you can use the shorter

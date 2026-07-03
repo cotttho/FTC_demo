@@ -14,10 +14,11 @@ LOCAL_PORT = int(os.environ.get("LOCAL_PORT", str(ROBOCOL_PORT)))
 TIMEOUT_SECONDS = float(os.environ.get("TIMEOUT_SECONDS", "8"))
 SEND_INTERVAL_SECONDS = float(os.environ.get("SEND_INTERVAL_SECONDS", "1.0"))
 SEND_PEER_DISCOVERY = os.environ.get("SEND_PEER_DISCOVERY", "1").lower() not in ("0", "false", "no", "off")
-SDK_BUILD_MONTH = int(os.environ.get("SDK_BUILD_MONTH", "9"))
-SDK_BUILD_YEAR = int(os.environ.get("SDK_BUILD_YEAR", "2022"))
-SDK_MAJOR_VERSION = int(os.environ.get("SDK_MAJOR_VERSION", "8"))
-SDK_MINOR_VERSION = int(os.environ.get("SDK_MINOR_VERSION", "0"))
+ROBOCOL_VERSION = int(os.environ.get("ROBOCOL_VERSION", "124"))
+SDK_BUILD_MONTH = int(os.environ.get("SDK_BUILD_MONTH", "1"))
+SDK_BUILD_YEAR = int(os.environ.get("SDK_BUILD_YEAR", "2026"))
+SDK_MAJOR_VERSION = int(os.environ.get("SDK_MAJOR_VERSION", "11"))
+SDK_MINOR_VERSION = int(os.environ.get("SDK_MINOR_VERSION", "1"))
 LOG_DIR = Path(os.environ.get("LOG_DIR", "reports"))
 
 MSG_TYPES = {
@@ -55,10 +56,10 @@ def build_command(name, extra="", seq=0):
 
 
 def build_peer_discovery(seq=0):
-    # FTC SDK 8.0 uses a historical peer-discovery frame:
+    # FTC SDK uses a historical peer-discovery frame:
     # msg type, payload size 10, robocol version, peer type, sequence, SDK date/version, trailing 0.
     payload = (
-        bytes([123, 1])
+        bytes([ROBOCOL_VERSION & 0xFF, 1])
         + be_u16(seq)
         + bytes([SDK_BUILD_MONTH & 0xFF])
         + be_u16(SDK_BUILD_YEAR)
