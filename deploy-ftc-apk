@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+ADB="${ADB:-$HOME/Library/Android/sdk/platform-tools/adb}"
+FTC_HOST="${FTC_HOST:-192.168.43.1}"
+FTC_ADB="${FTC_ADB:-${FTC_HOST}:5555}"
+APK="${APK:-TeamCode/build/outputs/apk/debug/TeamCode-debug.apk}"
+PACKAGE="${PACKAGE:-com.qualcomm.ftcrobotcontroller}"
+NO_BUILD="${NO_BUILD:-0}"
+UNINSTALL_INCOMPATIBLE="${UNINSTALL_INCOMPATIBLE:-0}"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./deploy-ftc-apk
+
+Builds the local FTC Robot Controller APK, installs it on the Control Hub over
+ADB, and starts the Robot Controller app. Assumes this Mac can reach the Control
+Hub ADB target, usually 192.168.43.1:5555 while connected to the Control Hub Wi-Fi.
+
+Environment:
+  FTC_ADB=192.168.43.1:5555       ADB serial/host target
+  NO_BUILD=1                      Install the existing APK without rebuilding
+  UNINSTALL_INCOMPATIBLE=1         Uninstall the old RC app if signatures differ
+USAGE
+}
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+esac
+
+run_timeout() {
+  local seconds="$1"
+  shift
+  local pid watcher status
+
+  "$@" &
+  pid="$!"
+  (
+    sleep "$seconds"
+    kill "$pid" >/dev/null 2>&1 || true
+    sleep 2
+    kill -KILL "$pid" >/dev/null 2>&1 || true
+  ) &
+  watcher="$!"
+
+  set +e
+  wait "$pid"
+  status="$?"
+  set -e
+  kill "$watcher" >/dev/null 2>&1 || true
+  wait "$watcher" >/dev/null 2>&1 || true
+  return "$status"
+}
+
+connect_adb() {
+  if [[ "$FTC_ADB" == *:* ]]; then
+    run_timeout 15 "$ADB" connect "$FTC_ADB" || true
+  fi
+
+  local state
+  state="$(run_timeout 10 "$ADB" -s "$FTC_ADB" get-state 2>/dev/null || true)"
+  if [[ "$state" != "device" ]]; then
+    echo "ADB target is not ready: ${FTC_ADB} state=${state:-<none>}"
+    run_timeout 10 "$ADB" devices -l || true
+    exit 10
+  fi
+}
+
+if [[ "$NO_BUILD" != "1" ]]; then
+  ./gradlew :TeamCode:assembleDebug
+fi
+
+if [[ ! -s "$APK" ]]; then
+  echo "Missing APK: $APK"
+  exit 2
+fi
+
+connect_adb
+
+echo "Installing $APK on $FTC_ADB"
+set +e
+install_output="$("$ADB" -s "$FTC_ADB" install -r -d "$APK" 2>&1)"
+install_status="$?"
+set -e
+printf '%s\n' "$install_output"
+
+if [[ "$install_status" -ne 0 ]]; then
+  if [[ "$install_output" == *"INSTALL_FAILED_UPDATE_INCOMPATIBLE"* && "$UNINSTALL_INCOMPATIBLE" == "1" ]]; then
+    echo "Signature differs; uninstalling $PACKAGE and retrying because UNINSTALL_INCOMPATIBLE=1."
+    "$ADB" -s "$FTC_ADB" uninstall "$PACKAGE" || true
+    "$ADB" -s "$FTC_ADB" install -r -d "$APK"
+  elif [[ "$install_output" == *"INSTALL_FAILED_UPDATE_INCOMPATIBLE"* ]]; then
+    echo "Install failed because the existing Robot Controller app has a different signing key."
+    echo "Review the impact, then rerun with UNINSTALL_INCOMPATIBLE=1 if you want this script to uninstall it first."
+    exit "$install_status"
+  else
+    exit "$install_status"
+  fi
+fi
+
+echo "Starting $PACKAGE"
+"$ADB" -s "$FTC_ADB" shell monkey -p "$PACKAGE" -c android.intent.category.LAUNCHER 1 >/dev/null
+
+echo "Installed and started. Tail logs with:"
+echo "  ./logcat-ftc"

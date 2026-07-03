@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}"
+BUILD_TOOLS="${BUILD_TOOLS:-$(ls -d "$SDK_ROOT"/build-tools/* 2>/dev/null | sort -V | tail -n 1)}"
+ANDROID_JAR="${ANDROID_JAR:-$(ls "$SDK_ROOT"/platforms/android-*/android.jar 2>/dev/null | sort -V | tail -n 1)}"
+JAVAC="${JAVAC:-javac}"
+
+OUT_DIR="build/ftc-dance"
+CLASSES_DIR="$OUT_DIR/classes"
+DEX_DIR="$OUT_DIR/dex"
+JAR="$OUT_DIR/ftc-dance.jar"
+
+mkdir -p "$CLASSES_DIR" "$DEX_DIR"
+rm -rf "$CLASSES_DIR" "$DEX_DIR" "$JAR"
+mkdir -p "$CLASSES_DIR" "$DEX_DIR"
+
+"$JAVAC" -source 8 -target 8 -bootclasspath "$ANDROID_JAR" -d "$CLASSES_DIR" FtcDanceSerial.java
+"$BUILD_TOOLS/d8" --min-api 23 --output "$DEX_DIR" "$CLASSES_DIR"/FtcDanceSerial*.class
+(cd "$DEX_DIR" && zip -q "../ftc-dance.jar" classes.dex)
+
+printf '%s\n' "$JAR"

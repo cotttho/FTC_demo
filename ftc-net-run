@@ -1,0 +1,349 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+WIFI_DEVICE="${WIFI_DEVICE:-en0}"
+FTC_SSID="${FTC_SSID:-FTC-L3OE}"
+FTC_HOST="${FTC_HOST:-192.168.43.1}"
+FTC_PORT="${FTC_PORT:-8080}"
+FTC_URL="${FTC_URL:-http://${FTC_HOST}:${FTC_PORT}/}"
+WAIT_SECONDS="${WAIT_SECONDS:-45}"
+JOIN_WIFI_TIMEOUT="${JOIN_WIFI_TIMEOUT:-30}"
+JOIN_WIFI_RETRIES="${JOIN_WIFI_RETRIES:-3}"
+RESTORE_WAIT_SECONDS="${RESTORE_WAIT_SECONDS:-45}"
+RESTORE_CYCLE_WIFI="${RESTORE_CYCLE_WIFI:-}"
+CISCO_SECURE_CLIENT="${CISCO_SECURE_CLIENT:-}"
+CISCO_VPN_BIN="${CISCO_VPN_BIN:-/opt/cisco/secureclient/bin/vpn}"
+CISCO_VPN_HOST="${CISCO_VPN_HOST:-}"
+CISCO_CONNECT_TIMEOUT="${CISCO_CONNECT_TIMEOUT:-180}"
+SKIP_RESTORE="${SKIP_RESTORE:-}"
+SKIP_CONSOLE_WAIT="${SKIP_CONSOLE_WAIT:-}"
+
+ORIGINAL_SSID=""
+RESTORE_SSID="${RESTORE_SSID:-}"
+CISCO_DETECTED_HOST=""
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./ftc-net-run -- <command> [args...]
+
+Connects this Mac to the FTC Control Hub Wi-Fi, waits for the Robot Controller
+console, runs the command, then tries to restore the previous Wi-Fi.
+
+Defaults:
+  FTC_SSID=FTC-L3OE
+  FTC_URL=http://192.168.43.1:8080/
+  WIFI_DEVICE=en0
+
+Optional environment variables:
+  FTC_WIFI_PASSWORD       Password for FTC-L3OE if it is not saved in Keychain.
+  RESTORE_SSID            Wi-Fi SSID to restore. Defaults to the current SSID.
+  RESTORE_WIFI_PASSWORD   Password for RESTORE_SSID if it is not saved.
+  VPN_SERVICE             macOS VPN service name for scutil --nc stop/start.
+  VPN_DISCONNECT_CMD      Shell command to disconnect VPN.
+  VPN_RECONNECT_CMD       Shell command to reconnect VPN.
+  CISCO_SECURE_CLIENT=1   Use Cisco Secure Client CLI for VPN handoff.
+  CISCO_VPN_HOST          Host to reconnect Cisco VPN to. Defaults to current.
+  CISCO_VPN_BIN           Cisco CLI path. Default: /opt/cisco/secureclient/bin/vpn.
+  CISCO_CONNECT_TIMEOUT   Seconds to wait for Cisco reconnect. Default: 180.
+  SKIP_RESTORE=1          Do not try to restore Wi-Fi or VPN in the exit trap.
+  RESTORE_CYCLE_WIFI=1    Cycle Wi-Fi off/on after restoring the target SSID.
+  JOIN_WIFI_TIMEOUT       Seconds to wait for Wi-Fi join. Default: 30.
+  JOIN_WIFI_RETRIES       Join attempts before giving up. Default: 3.
+  RESTORE_WAIT_SECONDS    Seconds to wait for restored network route. Default: 45.
+  WAIT_SECONDS            Seconds to wait for the FTC console. Default: 45.
+  SKIP_CONSOLE_WAIT=1     Join FTC Wi-Fi and run the command without waiting
+                          for the Robot Controller web console.
+
+Examples:
+  ./ftc-net-run -- curl -I http://192.168.43.1:8080/
+  ./ftc-net-run -- sh -c 'curl -fsS "$FTC_URL"'
+  CISCO_SECURE_CLIENT=1 ./ftc-net-run -- curl -I http://192.168.43.1:8080/
+  FTC_WIFI_PASSWORD='password' ./ftc-net-run -- curl -I http://192.168.43.1:8080/
+USAGE
+}
+
+current_ssid() {
+  local line
+  line="$(networksetup -getairportnetwork "$WIFI_DEVICE" 2>/dev/null || true)"
+  case "$line" in
+    *": "*)
+      local ssid="${line#*: }"
+      if [[ "$ssid" != "<redacted>" && "$ssid" != "You are not associated with an AirPort network." ]]; then
+        printf '%s\n' "$ssid"
+      fi
+      ;;
+    *)
+      system_profiler SPAirPortDataType 2>/dev/null \
+        | awk '
+            /Current Network Information:/ {
+              getline
+              gsub(/^[[:space:]]+/, "", $0)
+              sub(/:$/, "", $0)
+              if ($0 != "" && $0 != "<redacted>" && $0 !~ /Network Type:/) {
+                print
+                exit
+              }
+            }
+          '
+      ;;
+  esac
+}
+
+join_wifi() {
+  local ssid="$1"
+  local password="${2:-}"
+
+  if [[ -n "$password" ]]; then
+    run_with_timeout "$JOIN_WIFI_TIMEOUT" networksetup -setairportnetwork "$WIFI_DEVICE" "$ssid" "$password"
+  else
+    run_with_timeout "$JOIN_WIFI_TIMEOUT" networksetup -setairportnetwork "$WIFI_DEVICE" "$ssid"
+  fi
+}
+
+ftc_wifi_ip_present() {
+  local ip prefix
+  prefix="${FTC_HOST%.*}."
+  ip="$(ipconfig getifaddr "$WIFI_DEVICE" 2>/dev/null || true)"
+  [[ -n "$ip" && "$ip" == "$prefix"* ]]
+}
+
+wait_for_ftc_wifi_ip() {
+  local deadline
+  deadline=$((SECONDS + 12))
+
+  while (( SECONDS < deadline )); do
+    if ftc_wifi_ip_present; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  return 1
+}
+
+join_wifi_with_retries() {
+  local ssid="$1"
+  local password="${2:-}"
+  local attempt
+
+  for ((attempt = 1; attempt <= JOIN_WIFI_RETRIES; attempt++)); do
+    if join_wifi "$ssid" "$password"; then
+      if [[ "$ssid" == "$FTC_SSID" ]]; then
+        if wait_for_ftc_wifi_ip; then
+          return 0
+        fi
+        printf 'Wi-Fi join command returned for %s, but no %s.x address appeared on %s.\n' "$ssid" "${FTC_HOST%.*}" "$WIFI_DEVICE" >&2
+      else
+        sleep 2
+        return 0
+      fi
+    fi
+
+    printf 'Wi-Fi join failed for %s (attempt %d/%d).\n' "$ssid" "$attempt" "$JOIN_WIFI_RETRIES" >&2
+    sleep 3
+
+    if (( attempt == 1 )); then
+      printf 'Cycling Wi-Fi before retrying %s.\n' "$ssid" >&2
+      networksetup -setairportpower "$WIFI_DEVICE" off >/dev/null 2>&1 || true
+      sleep 2
+      networksetup -setairportpower "$WIFI_DEVICE" on >/dev/null 2>&1 || true
+      sleep 5
+    fi
+  done
+
+  return 1
+}
+
+wait_for_restored_route() {
+  local deadline
+  deadline=$((SECONDS + RESTORE_WAIT_SECONDS))
+
+  while (( SECONDS < deadline )); do
+    if restored_route_present; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  return 1
+}
+
+restored_route_present() {
+  local ip
+  ip="$(ipconfig getifaddr "$WIFI_DEVICE" 2>/dev/null || true)"
+  [[ -n "$ip" && "$ip" != "${FTC_HOST%.*}."* ]] \
+    && route -n get default >/dev/null 2>&1
+}
+
+is_truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|y|Y|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+detect_cisco_vpn_host() {
+  if [[ ! -x "$CISCO_VPN_BIN" ]]; then
+    return 0
+  fi
+
+  "$CISCO_VPN_BIN" state 2>/dev/null \
+    | awk '
+        /Connected to / {
+          for (i = 1; i <= NF; i++) {
+            if ($i == "to") {
+              host = $(i + 1)
+              sub(/\.$/, "", host)
+              print host
+              exit
+            }
+          }
+        }
+      '
+}
+
+run_with_timeout() {
+  local seconds="$1"
+  shift
+  local pid watcher status
+
+  "$@" &
+  pid="$!"
+  (
+    sleep "$seconds"
+    kill "$pid" >/dev/null 2>&1 || true
+    sleep 2
+    kill -KILL "$pid" >/dev/null 2>&1 || true
+  ) &
+  watcher="$!"
+
+  set +e
+  wait "$pid"
+  status="$?"
+  set -e
+  kill "$watcher" >/dev/null 2>&1 || true
+  wait "$watcher" >/dev/null 2>&1 || true
+  return "$status"
+}
+
+disconnect_vpn() {
+  if [[ -n "${VPN_DISCONNECT_CMD:-}" ]]; then
+    bash -lc "$VPN_DISCONNECT_CMD"
+  elif [[ -n "${VPN_SERVICE:-}" ]]; then
+    scutil --nc stop "$VPN_SERVICE" >/dev/null 2>&1 || true
+  elif is_truthy "$CISCO_SECURE_CLIENT"; then
+    run_with_timeout 30 "$CISCO_VPN_BIN" disconnect || true
+  fi
+}
+
+reconnect_vpn() {
+  if [[ -n "${VPN_RECONNECT_CMD:-}" ]]; then
+    bash -lc "$VPN_RECONNECT_CMD"
+  elif [[ -n "${VPN_SERVICE:-}" ]]; then
+    scutil --nc start "$VPN_SERVICE" >/dev/null 2>&1 || true
+  elif is_truthy "$CISCO_SECURE_CLIENT"; then
+    local host="${CISCO_VPN_HOST:-$CISCO_DETECTED_HOST}"
+
+    if [[ -n "$host" ]]; then
+      printf 'Reconnecting Cisco Secure Client VPN: %s\n' "$host" >&2
+      run_with_timeout "$CISCO_CONNECT_TIMEOUT" "$CISCO_VPN_BIN" connect "$host" || {
+        printf 'Cisco reconnect did not complete; opening Cisco Secure Client.\n' >&2
+        open -a "Cisco Secure Client" || true
+      }
+    else
+      printf 'No Cisco VPN host detected; opening Cisco Secure Client.\n' >&2
+      open -a "Cisco Secure Client" || true
+    fi
+  fi
+}
+
+restore_network() {
+  local target="${RESTORE_SSID:-$ORIGINAL_SSID}"
+
+  if is_truthy "$SKIP_RESTORE"; then
+    printf 'Skipping Wi-Fi/VPN restore because SKIP_RESTORE is set.\n' >&2
+    return 0
+  fi
+
+  if restored_route_present; then
+    printf 'Restored network route already present; skipping Wi-Fi join.\n' >&2
+  elif [[ -n "$target" && "$(current_ssid)" != "$target" ]]; then
+    printf 'Restoring Wi-Fi: %s\n' "$target" >&2
+    join_wifi_with_retries "$target" "${RESTORE_WIFI_PASSWORD:-}" || true
+  elif [[ -z "$target" ]]; then
+    printf 'No restore SSID detected; cycling Wi-Fi to let macOS auto-join a preferred network.\n' >&2
+    networksetup -setairportpower "$WIFI_DEVICE" off >/dev/null 2>&1 || true
+    sleep 2
+    networksetup -setairportpower "$WIFI_DEVICE" on >/dev/null 2>&1 || true
+    sleep 8
+  fi
+
+  if is_truthy "$RESTORE_CYCLE_WIFI"; then
+    printf 'Cycling Wi-Fi after restore to refresh macOS network state.\n' >&2
+    networksetup -setairportpower "$WIFI_DEVICE" off >/dev/null 2>&1 || true
+    sleep 2
+    networksetup -setairportpower "$WIFI_DEVICE" on >/dev/null 2>&1 || true
+    sleep 8
+    if [[ -n "$target" ]]; then
+      join_wifi_with_retries "$target" "${RESTORE_WIFI_PASSWORD:-}" || true
+    fi
+  fi
+
+  wait_for_restored_route || printf 'Restored Wi-Fi route was not confirmed before VPN reconnect.\n' >&2
+  reconnect_vpn || true
+}
+
+wait_for_console() {
+  local deadline
+  deadline=$((SECONDS + WAIT_SECONDS))
+
+  until curl -fsS --connect-timeout 1 --max-time 2 "$FTC_URL" >/dev/null; do
+    if (( SECONDS >= deadline )); then
+      printf 'Timed out waiting for FTC console at %s\n' "$FTC_URL" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+if [[ "${1:-}" == "--" ]]; then
+  shift
+fi
+
+if [[ "$#" -eq 0 ]]; then
+  usage >&2
+  exit 2
+fi
+
+ORIGINAL_SSID="$(current_ssid)"
+
+if is_truthy "$CISCO_SECURE_CLIENT" && [[ -z "$CISCO_VPN_HOST" ]]; then
+  CISCO_DETECTED_HOST="$(detect_cisco_vpn_host)"
+fi
+
+trap restore_network EXIT
+
+printf 'Current Wi-Fi: %s\n' "${ORIGINAL_SSID:-<none>}" >&2
+if is_truthy "$CISCO_SECURE_CLIENT"; then
+  printf 'Cisco VPN host: %s\n' "${CISCO_VPN_HOST:-${CISCO_DETECTED_HOST:-<not detected>}}" >&2
+fi
+disconnect_vpn
+
+printf 'Connecting to FTC Wi-Fi: %s\n' "$FTC_SSID" >&2
+join_wifi_with_retries "$FTC_SSID" "${FTC_WIFI_PASSWORD:-}"
+
+if is_truthy "$SKIP_CONSOLE_WAIT"; then
+  printf 'Skipping FTC console wait because SKIP_CONSOLE_WAIT is set.\n' >&2
+else
+  printf 'Waiting for FTC console: %s\n' "$FTC_URL" >&2
+  wait_for_console
+fi
+
+printf 'Running command on FTC network...\n' >&2
+FTC_HOST="$FTC_HOST" FTC_PORT="$FTC_PORT" FTC_URL="$FTC_URL" "$@"

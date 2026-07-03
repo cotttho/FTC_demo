@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+ADB="${ADB:-$HOME/Library/Android/sdk/platform-tools/adb}"
+FTC_HOST="${FTC_HOST:-192.168.43.1}"
+FTC_ADB="${FTC_ADB:-${FTC_HOST}:5555}"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./logcat-ftc [logcat filter...]
+
+Tails logcat from the Control Hub. By default this filters to the DanceBotAuto
+and DanceBotMotorTest tags plus core Robot Controller errors.
+
+Examples:
+  ./logcat-ftc
+  ./logcat-ftc DanceBotAuto:V '*:S'
+  ./logcat-ftc '*:I'
+USAGE
+}
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+esac
+
+if [[ "$FTC_ADB" == *:* ]]; then
+  "$ADB" connect "$FTC_ADB" >/dev/null || true
+fi
+
+if [[ "$#" -gt 0 ]]; then
+  exec "$ADB" -s "$FTC_ADB" logcat -v time "$@"
+fi
+
+exec "$ADB" -s "$FTC_ADB" logcat -v time \
+  DanceBotAuto:V \
+  DanceBotMotorTest:V \
+  AndroidRuntime:E \
+  System.err:W \
+  RobotCore:W \
+  FtcRobotController:W \
+  '*:S'

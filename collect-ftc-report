@@ -1,0 +1,595 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+FTC_HOST="${FTC_HOST:-192.168.43.1}"
+FTC_PORT="${FTC_PORT:-8080}"
+FTC_URL="${FTC_URL:-http://${FTC_HOST}:${FTC_PORT}/}"
+REPORT_ROOT="${REPORT_ROOT:-reports}"
+STAMP="$(date +%Y%m%d-%H%M%S)"
+OUTDIR="${FTC_REPORT_DIR:-${REPORT_ROOT}/ftc-robot-${STAMP}}"
+
+mkdir -p "$OUTDIR/http" "$OUTDIR/adb" "$OUTDIR/config"
+LOG="$OUTDIR/collection.log"
+exec > >(tee -a "$LOG") 2>&1
+
+printf 'FTC robot report collection started: %s\n' "$(date)"
+printf 'Target console: %s\n' "$FTC_URL"
+printf 'Output: %s\n' "$OUTDIR"
+
+port_open() {
+  python3 - "$1" "$2" <<'PY'
+import socket
+import sys
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+sock = socket.socket()
+sock.settimeout(2)
+try:
+    sock.connect((host, port))
+except OSError:
+    sys.exit(1)
+finally:
+    sock.close()
+PY
+}
+
+if [[ "${GENERATE_ONLY:-}" != "1" ]]; then
+printf '\n[1/4] Crawling Control Hub web console\n'
+python3 - "$FTC_URL" "$OUTDIR/http" <<'PY'
+import html.parser
+import json
+import re
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+base_url = sys.argv[1]
+outdir = Path(sys.argv[2])
+outdir.mkdir(parents=True, exist_ok=True)
+
+parsed_base = urllib.parse.urlparse(base_url)
+origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
+
+initial_paths = [
+    "/",
+    "/manage",
+    "/inspection",
+    "/inspect",
+    "/java",
+    "/blocks",
+    "/programming",
+    "/config",
+    "/configuration",
+    "/configurations",
+    "/hardware",
+    "/server",
+    "/server/status",
+    "/status",
+    "/ping",
+    "/robots.txt",
+]
+
+class LinkParser(html.parser.HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.links = []
+
+    def handle_starttag(self, tag, attrs):
+        for key, value in attrs:
+            if key.lower() in {"href", "src", "action"} and value:
+                self.links.append(value)
+
+def safe_name(index, url):
+    parsed = urllib.parse.urlparse(url)
+    path = parsed.path or "/"
+    name = path.strip("/").replace("/", "__") or "root"
+    if parsed.query:
+        name += "__" + re.sub(r"[^A-Za-z0-9_.-]+", "_", parsed.query)[:80]
+    name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name)
+    return f"{index:03d}_{name}"
+
+def normalize(candidate):
+    if not candidate:
+        return None
+    url = urllib.parse.urljoin(origin + "/", candidate)
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    if parsed.netloc != parsed_base.netloc:
+        return None
+    return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path or "/", "", parsed.query, ""))
+
+queue = []
+seen = set()
+for path in initial_paths:
+    url = normalize(path)
+    if url and url not in seen:
+        seen.add(url)
+        queue.append(url)
+
+inventory = []
+index = 0
+while queue and index < 80:
+    url = queue.pop(0)
+    index += 1
+    item = {
+        "index": index,
+        "url": url,
+        "ok": False,
+        "status": None,
+        "content_type": "",
+        "body_file": None,
+        "error": None,
+    }
+    name = safe_name(index, url)
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "ftc-report-collector/1.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            body = resp.read(2_000_000)
+            headers = dict(resp.headers.items())
+            item["ok"] = 200 <= resp.status < 400
+            item["status"] = resp.status
+            item["content_type"] = resp.headers.get("Content-Type", "")
+            item["body_file"] = f"{name}.body"
+            (outdir / f"{name}.headers.json").write_text(json.dumps(headers, indent=2), encoding="utf-8")
+            (outdir / f"{name}.body").write_bytes(body)
+
+        text = body.decode("utf-8", errors="ignore")
+        if "html" in item["content_type"].lower() or "<html" in text[:500].lower():
+            parser = LinkParser()
+            parser.feed(text)
+            candidates = parser.links
+            candidates += re.findall(r"""["'](/[^"'<> ]+)["']""", text)
+            for link in candidates:
+                next_url = normalize(link)
+                if next_url and next_url not in seen:
+                    seen.add(next_url)
+                    queue.append(next_url)
+    except urllib.error.HTTPError as exc:
+        item["status"] = exc.code
+        item["error"] = str(exc)
+        try:
+            body = exc.read(200_000)
+            item["body_file"] = f"{name}.body"
+            (outdir / f"{name}.body").write_bytes(body)
+        except Exception:
+            pass
+    except Exception as exc:
+        item["error"] = repr(exc)
+
+    inventory.append(item)
+    time.sleep(0.05)
+
+(outdir / "inventory.json").write_text(json.dumps(inventory, indent=2), encoding="utf-8")
+ok_count = sum(1 for item in inventory if item["ok"])
+print(f"Fetched {len(inventory)} console URLs; {ok_count} returned 2xx/3xx.")
+PY
+
+printf '\n[2/4] Collecting ADB diagnostics and FTC XML configs\n'
+ADB_BIN="${ADB_BIN:-$(command -v adb || true)}"
+ADB_SERIAL="${FTC_HOST}:5555"
+
+if [[ -z "$ADB_BIN" ]]; then
+  printf 'ADB not found; skipping ADB collection.\n'
+elif ! port_open "$FTC_HOST" 5555; then
+  printf 'ADB port %s:5555 is not open; skipping ADB collection.\n' "$FTC_HOST"
+else
+  printf 'ADB is reachable at %s\n' "$ADB_SERIAL"
+  "$ADB_BIN" start-server >"$OUTDIR/adb/start-server.txt" 2>&1 || true
+  "$ADB_BIN" connect "$ADB_SERIAL" >"$OUTDIR/adb/connect.txt" 2>&1 || true
+  "$ADB_BIN" devices -l >"$OUTDIR/adb/devices.txt" 2>&1 || true
+
+  adb_shell_save() {
+    local name="$1"
+    local command="$2"
+    printf '  adb shell %s\n' "$command"
+    "$ADB_BIN" -s "$ADB_SERIAL" shell "$command" >"$OUTDIR/adb/${name}.txt" 2>&1 || true
+  }
+
+  adb_shell_save getprop "getprop"
+  adb_shell_save uname "uname -a"
+  adb_shell_save packages "pm list packages | grep -Ei 'ftc|qualcomm|rev|firstinspires' || true"
+  adb_shell_save ftc-package "dumpsys package com.qualcomm.ftcrobotcontroller | grep -E 'versionName|versionCode|firstInstallTime|lastUpdateTime' || true"
+  adb_shell_save usb "dumpsys usb"
+  adb_shell_save first-dir "ls -la /sdcard/FIRST 2>/dev/null || true"
+  adb_shell_save first-files "find /sdcard/FIRST -maxdepth 5 -type f 2>/dev/null || true"
+  adb_shell_save app-shared-prefs-dir "ls -la /data/data/com.qualcomm.ftcrobotcontroller/shared_prefs 2>/dev/null || true"
+  adb_shell_save app-shared-prefs "cat /data/data/com.qualcomm.ftcrobotcontroller/shared_prefs/*.xml 2>/dev/null || true"
+  adb_shell_save app-shared-prefs-run-as "run-as com.qualcomm.ftcrobotcontroller sh -c 'ls -la shared_prefs 2>/dev/null; cat shared_prefs/*.xml 2>/dev/null' 2>/dev/null || true"
+  adb_shell_save config-candidates "find /sdcard/FIRST /storage/emulated/0/FIRST /mnt/sdcard/FIRST /data/data/com.qualcomm.ftcrobotcontroller -maxdepth 6 -type f \\( -iname '*.xml' -o -iname '*.json' -o -iname '*pref*' -o -iname '*config*' \\) 2>/dev/null || true"
+
+  "$ADB_BIN" -s "$ADB_SERIAL" shell "find /sdcard/FIRST /storage/emulated/0/FIRST /mnt/sdcard/FIRST -maxdepth 5 -type f \\( -iname '*.xml' -o -iname '*.json' \\) 2>/dev/null" \
+    | tr -d '\r' >"$OUTDIR/adb/remote-config-files.txt" || true
+
+  while IFS= read -r remote_file; do
+    [[ -z "$remote_file" ]] && continue
+    safe_file="${remote_file#/sdcard/FIRST/}"
+    safe_file="${safe_file//\//__}"
+    safe_file="${safe_file// /_}"
+    printf '  pulling %s\n' "$remote_file"
+    "$ADB_BIN" -s "$ADB_SERIAL" pull "$remote_file" "$OUTDIR/config/$safe_file" >>"$OUTDIR/adb/pull-config-files.txt" 2>&1 || true
+  done <"$OUTDIR/adb/remote-config-files.txt"
+fi
+else
+  printf '\n[1/4] Skipping web crawl; GENERATE_ONLY=1\n'
+  printf '\n[2/4] Skipping ADB collection; GENERATE_ONLY=1\n'
+fi
+
+printf '\n[3/4] Generating Markdown report\n'
+python3 - "$OUTDIR" "$FTC_URL" "$FTC_HOST" <<'PY'
+import json
+import re
+import sys
+import xml.etree.ElementTree as ET
+from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
+
+outdir = Path(sys.argv[1])
+ftc_url = sys.argv[2]
+ftc_host = sys.argv[3]
+
+def read_text(path):
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+def local_name(tag):
+    if "}" in tag:
+        return tag.rsplit("}", 1)[1]
+    return tag
+
+def clean(value):
+    return str(value or "").strip()
+
+def category_for(tag):
+    t = tag.lower()
+    if "webcam" in t or "camera" in t or "vision" in t:
+        return "Cameras"
+    if "motor" in t or "sparkmini" in t:
+        return "Motors"
+    if "servo" in t or "pwm" in t:
+        return "Servos"
+    sensor_words = [
+        "sensor", "imu", "gyro", "touch", "color", "distance", "range",
+        "analog", "digital", "i2c", "octoquad", "pinpoint", "huskylens",
+        "otos", "navx", "bno055", "limelight", "encoder", "voltage",
+        "ultrasonic", "optical", "compass", "accelerometer",
+    ]
+    if any(word in t for word in sensor_words):
+        return "Sensors and I/O"
+    return "Other Named Devices"
+
+def is_hub_tag(tag):
+    t = tag.lower()
+    return (
+        "lynxusbdevice" in t
+        or "lynxmodule" in t
+        or t in {"usbdevice", "motorcontroller", "servocontroller", "deviceinterfacemodule"}
+        or ("hub" in t and "hubbuiltinimu" not in t)
+    )
+
+def parse_config(path):
+    records = []
+    hubs = []
+    try:
+        tree = ET.parse(path)
+    except Exception as exc:
+        return [], [], f"{exc}"
+
+    root = tree.getroot()
+
+    def walk(node, ctx):
+        tag = local_name(node.tag)
+        attrs = {local_name(k): clean(v) for k, v in node.attrib.items()}
+        name = attrs.get("name", "")
+
+        next_ctx = dict(ctx)
+        if is_hub_tag(tag):
+            hub = {
+                "file": path.name,
+                "type": tag,
+                "name": name,
+                "serial": attrs.get("serialNumber", ""),
+                "address": attrs.get("moduleAddress", "") or attrs.get("parentModuleAddress", "") or attrs.get("port", ""),
+            }
+            hubs.append(hub)
+            if name:
+                next_ctx["hub"] = name
+            elif tag:
+                next_ctx["hub"] = tag
+
+        if name and not is_hub_tag(tag) and tag.lower() not in {"robot"}:
+            record = {
+                "file": path.name,
+                "category": category_for(tag),
+                "type": tag,
+                "name": name,
+                "hub": next_ctx.get("hub", ctx.get("hub", "")),
+                "port": attrs.get("port", ""),
+                "bus": attrs.get("bus", "") or attrs.get("i2cBus", ""),
+                "serial": attrs.get("serialNumber", ""),
+                "attrs": attrs,
+            }
+            records.append(record)
+
+        for child in list(node):
+            walk(child, next_ctx)
+
+    walk(root, {})
+    return hubs, records, ""
+
+def md_table(headers, rows):
+    if not rows:
+        return "_None found._\n"
+    def esc(value):
+        text = str(value or "")
+        text = text.replace("|", "\\|").replace("\n", " ")
+        return text
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join(esc(row.get(header, "")) for header in headers) + " |")
+    return "\n".join(lines) + "\n"
+
+def find_active_config_snippets():
+    snippets = []
+    for body in sorted((outdir / "http").glob("*.body")):
+        text = read_text(body)
+        if not text:
+            continue
+        plain = re.sub(r"<[^>]+>", " ", text)
+        plain = re.sub(r"\s+", " ", plain)
+        for match in re.finditer(r"(.{0,80}(?:active|selected|current).{0,30}config(?:uration)?[^.<>]{0,120})", plain, flags=re.I):
+            snippet = match.group(1).strip()
+            if snippet and snippet not in snippets:
+                snippets.append(snippet)
+            if len(snippets) >= 6:
+                return snippets
+    return snippets
+
+def parse_getprop():
+    props = {}
+    text = read_text(outdir / "adb" / "getprop.txt")
+    for line in text.splitlines():
+        match = re.match(r"\[([^]]+)\]: \[(.*)\]", line)
+        if match:
+            props[match.group(1)] = match.group(2)
+    return props
+
+def parse_active_config_pref():
+    texts = []
+    for name in ["app-shared-prefs.txt", "app-shared-prefs-run-as.txt", "config-candidates.txt"]:
+        text = read_text(outdir / "adb" / name)
+        if text:
+            texts.append(text)
+    combined = "\n".join(texts)
+    if not combined:
+        return ""
+
+    lines = []
+    for line in combined.splitlines():
+        if re.search(r"hardware_config|RobotConfigFile|pref_hardware|\"location\"|\"resourceId\"|\"isDirty\"", line, re.I):
+            stripped = line.strip()
+            if stripped and stripped not in lines:
+                lines.append(stripped)
+    return "\n".join(lines[:20])
+
+def parse_blocks_hardware():
+    hardware_js = ""
+    http_dir = outdir / "http"
+    for path in sorted(http_dir.glob("*.body")):
+        text = read_text(path)
+        if "function createDcMotorDropdown" in text or "function createServoControllerDropdown" in text:
+            hardware_js = text
+            break
+    if not hardware_js:
+        return []
+
+    non_hardware_prefixes = (
+        "Language", "Country", "SkyStoneSound", "Tfod", "Vuforia",
+        "CurrentGame", "RoverRuckus", "SkyStone",
+    )
+    non_hardware_exact = {
+        "AngleUnit", "AxesOrder", "AxesReference", "DistanceUnit", "TempUnit",
+        "RelicRecoveryVuMark", "CameraDirection",
+    }
+
+    rows = []
+    for match in re.finditer(r"function create(\w+)Dropdown\(\)\s*\{\s*var CHOICES = \[(.*?)\];", hardware_js, re.S):
+        dropdown_type = match.group(1)
+        if dropdown_type in non_hardware_exact or dropdown_type.startswith(non_hardware_prefixes):
+            continue
+        body = match.group(2)
+        pairs = re.findall(r"\['([^']*)',\s*'([^']*)'\]", body)
+        for display, identifier in pairs:
+            display = display.replace("\u00a0", " ")
+            identifier = identifier.replace("\u00a0", " ")
+            if not display and not identifier:
+                continue
+            rows.append({
+                "category": category_for(dropdown_type),
+                "type": dropdown_type,
+                "display": display,
+                "identifier": identifier,
+            })
+    return rows
+
+inventory_path = outdir / "http" / "inventory.json"
+inventory = []
+if inventory_path.exists():
+    inventory = json.loads(read_text(inventory_path) or "[]")
+
+config_files = sorted((outdir / "config").glob("*"))
+config_files = [p for p in config_files if p.suffix.lower() in {".xml", ".json"}]
+xml_files = [p for p in config_files if p.suffix.lower() == ".xml"]
+
+all_hubs = []
+all_records = []
+parse_errors = {}
+for path in xml_files:
+    hubs, records, error = parse_config(path)
+    if error:
+        parse_errors[path.name] = error
+    if hubs or records:
+        all_hubs.extend(hubs)
+        all_records.extend(records)
+
+by_category = defaultdict(list)
+for record in all_records:
+    by_category[record["category"]].append(record)
+
+props = parse_getprop()
+adb_devices = read_text(outdir / "adb" / "devices.txt").strip()
+adb_connect = read_text(outdir / "adb" / "connect.txt").strip()
+ftc_package = read_text(outdir / "adb" / "ftc-package.txt").strip()
+usb_text = read_text(outdir / "adb" / "usb.txt")
+active_snippets = find_active_config_snippets()
+active_config_pref = parse_active_config_pref()
+blocks_hardware = parse_blocks_hardware()
+
+ok_urls = [item for item in inventory if item.get("ok")]
+failed_urls = [item for item in inventory if not item.get("ok")]
+
+lines = []
+lines.append("# FTC Robot Hardware Report")
+lines.append("")
+lines.append(f"- Generated: {datetime.now().isoformat(timespec='seconds')}")
+lines.append(f"- Control Hub URL: `{ftc_url}`")
+lines.append(f"- Control Hub host: `{ftc_host}`")
+lines.append(f"- Raw collection directory: `{outdir}`")
+lines.append("")
+
+lines.append("## Collection Summary")
+lines.append("")
+lines.append(f"- Web console URLs fetched successfully: {len(ok_urls)} of {len(inventory)}")
+lines.append(f"- ADB connect output: `{adb_connect.splitlines()[-1] if adb_connect else 'not collected'}`")
+if adb_devices:
+    lines.append("- ADB devices:")
+    lines.append("")
+    lines.append("```text")
+    lines.append(adb_devices)
+    lines.append("```")
+if props:
+    model = props.get("ro.product.model") or props.get("ro.product.device") or ""
+    android = props.get("ro.build.version.release") or ""
+    build = props.get("ro.build.display.id") or props.get("ro.build.fingerprint") or ""
+    lines.append(f"- Android model: `{model or 'unknown'}`")
+    lines.append(f"- Android version: `{android or 'unknown'}`")
+    lines.append(f"- Build: `{build or 'unknown'}`")
+if ftc_package:
+    lines.append("- FTC Robot Controller package details:")
+    lines.append("")
+    lines.append("```text")
+    lines.append(ftc_package)
+    lines.append("```")
+if active_config_pref:
+    lines.append("- Active/config preference excerpts:")
+    lines.append("")
+    lines.append("```text")
+    lines.append(active_config_pref)
+    lines.append("```")
+lines.append("")
+
+if active_snippets:
+    lines.append("## Console Configuration Clues")
+    lines.append("")
+    for snippet in active_snippets:
+        lines.append(f"- {snippet}")
+    lines.append("")
+
+lines.append("## Configuration Files Found")
+lines.append("")
+if config_files:
+    for path in config_files:
+        marker = "hardware config" if any(r["file"] == path.name for r in all_records) or any(h["file"] == path.name for h in all_hubs) else "supporting file"
+        lines.append(f"- `{path.name}` ({marker})")
+else:
+    lines.append("_No FTC XML or JSON configuration files were pulled._")
+lines.append("")
+
+if parse_errors:
+    lines.append("## XML Parse Warnings")
+    lines.append("")
+    for name, error in parse_errors.items():
+        lines.append(f"- `{name}`: {error}")
+    lines.append("")
+
+lines.append("## Hubs And Controllers")
+lines.append("")
+lines.append(md_table(["file", "type", "name", "serial", "address"], all_hubs))
+lines.append("")
+
+lines.append("## Hardware Map Exposed By Blocks")
+lines.append("")
+if blocks_hardware:
+    rows = []
+    for item in blocks_hardware:
+        rows.append({
+            "category": item["category"],
+            "type": item["type"],
+            "display": item["display"],
+            "identifier": item["identifier"],
+        })
+    lines.append(md_table(["category", "type", "display", "identifier"], rows))
+else:
+    lines.append("_No Blocks hardware dropdown entries found._\n")
+lines.append("")
+
+for category in ["Motors", "Servos", "Sensors and I/O", "Cameras", "Other Named Devices"]:
+    lines.append(f"## {category}")
+    lines.append("")
+    rows = []
+    for record in by_category.get(category, []):
+        rows.append({
+            "file": record["file"],
+            "type": record["type"],
+            "name": record["name"],
+            "hub": record["hub"],
+            "port": record["port"],
+            "bus": record["bus"],
+            "serial": record["serial"],
+        })
+    lines.append(md_table(["file", "type", "name", "hub", "port", "bus", "serial"], rows))
+    lines.append("")
+
+if usb_text:
+    interesting_usb = []
+    for line in usb_text.splitlines():
+        if re.search(r"Device|Product|Manufacturer|Serial|VID|PID|mName|mProductName|mManufacturerName", line, re.I):
+            stripped = line.strip()
+            if stripped:
+                interesting_usb.append(stripped)
+    if interesting_usb:
+        lines.append("## USB Enumeration Excerpts")
+        lines.append("")
+        lines.append("```text")
+        lines.append("\n".join(interesting_usb[:120]))
+        lines.append("```")
+        lines.append("")
+
+lines.append("## Notes")
+lines.append("")
+lines.append("- The motors, servos, sensors, and cameras above are read from FTC configuration files pulled from `/sdcard/FIRST` when ADB was available.")
+lines.append("- A saved FTC configuration is the authoritative source for the robot names and hub ports used by OpModes, but it is not a live electrical test of every port.")
+lines.append("- The Blocks hardware map section is generated from the Robot Controller's `/hardware` JavaScript endpoint and reflects devices exposed to Blocks at collection time.")
+lines.append("- No movement commands or OpModes were started by this collector.")
+if failed_urls:
+    lines.append(f"- Some console URLs returned errors or timeouts; see `http/inventory.json` for details.")
+
+report = "\n".join(lines).rstrip() + "\n"
+(outdir / "REPORT.md").write_text(report, encoding="utf-8")
+(Path("reports") / "latest-ftc-report.md").write_text(report, encoding="utf-8")
+print(f"Wrote {outdir / 'REPORT.md'}")
+print("Wrote reports/latest-ftc-report.md")
+PY
+
+printf '\n[4/4] Done\n'
+printf 'Report: %s\n' "$OUTDIR/REPORT.md"

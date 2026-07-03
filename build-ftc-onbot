@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+FTC_HOST="${FTC_HOST:-192.168.43.1}"
+FTC_PORT="${FTC_PORT:-8080}"
+FTC_URL="${FTC_URL:-http://${FTC_HOST}:${FTC_PORT}}"
+FTC_URL="${FTC_URL%/}"
+LOG_DIR="${LOG_DIR:-reports}"
+TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+OUT_DIR="$LOG_DIR/onbot-build-$TIMESTAMP"
+LOG_FILE="$OUT_DIR/build.log"
+TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-180}"
+
+mkdir -p "$OUT_DIR"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./build-ftc-onbot
+
+Assumes this Mac is already connected to the FTC Control Hub Wi-Fi. It starts an
+OnBot Java build, polls build status, and captures build logs.
+
+This compiles source only. It does not start any OpMode or actuate motors.
+USAGE
+}
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+esac
+
+http_code() {
+  local method="$1"
+  local path="$2"
+  local out="$3"
+  curl -sS -X "$method" -o "$out" -w "%{http_code}" \
+    --connect-timeout 2 --max-time 20 "${FTC_URL}${path}" || true
+}
+
+poll_status() {
+  local deadline code status_json completed running successful
+  deadline=$((SECONDS + TIMEOUT_SECONDS))
+
+  while (( SECONDS < deadline )); do
+    code="$(http_code GET /java/build/status "$OUT_DIR/status.json")"
+    printf 'status-http=%s ' "$code"
+    cat "$OUT_DIR/status.json" || true
+    printf '\n'
+
+    if [[ "$code" == "200" ]]; then
+      read -r completed running successful < <(python3 - "$OUT_DIR/status.json" <<'PY'
+import json
+import sys
+
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    data = {}
+
+print(
+    str(bool(data.get("completed", False))).lower(),
+    str(bool(data.get("running", False))).lower(),
+    str(bool(data.get("successful", False))).lower(),
+)
+PY
+)
+      if [[ "$completed" == "true" && "$running" == "false" ]]; then
+        if [[ "$successful" == "true" ]]; then
+          return 0
+        fi
+        return 1
+      fi
+    fi
+
+    sleep 2
+  done
+
+  echo "Timed out waiting for OnBot Java build to finish."
+  return 2
+}
+
+echo "date=$(date)"
+echo "console=$FTC_URL"
+echo "This compiles OnBot Java only; it does not actuate motors."
+
+echo "--- source tree before build ---"
+tree_code="$(http_code GET /java/file/tree "$OUT_DIR/file-tree.json")"
+echo "file-tree-http=$tree_code"
+cat "$OUT_DIR/file-tree.json" || true
+echo
+
+echo "--- starting build ---"
+start_code="$(http_code POST /java/build/start "$OUT_DIR/start-post.body")"
+echo "build-start-post-http=$start_code"
+cat "$OUT_DIR/start-post.body" || true
+echo
+
+if [[ "$start_code" != 2* ]]; then
+  start_code="$(http_code GET /java/build/start "$OUT_DIR/start-get.body")"
+  echo "build-start-get-http=$start_code"
+  cat "$OUT_DIR/start-get.body" || true
+  echo
+fi
+
+case "$start_code" in
+  2*) ;;
+  *)
+    echo "Could not start OnBot Java build."
+    echo "Output dir: $OUT_DIR"
+    exit 10
+    ;;
+esac
+
+set +e
+poll_status
+build_status=$?
+set -e
+
+echo "--- build wait/log ---"
+wait_code="$(http_code GET /java/build/wait "$OUT_DIR/build-wait.txt")"
+echo "build-wait-http=$wait_code"
+cat "$OUT_DIR/build-wait.txt" || true
+echo
+
+log_code="$(http_code GET /java/build/log "$OUT_DIR/build-log.txt")"
+echo "build-log-http=$log_code"
+cat "$OUT_DIR/build-log.txt" || true
+echo
+
+echo "Output dir: $OUT_DIR"
+echo "Log: $LOG_FILE"
+exit "$build_status"

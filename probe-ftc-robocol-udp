@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+import json
+import os
+import select
+import socket
+import struct
+import time
+from datetime import datetime
+from pathlib import Path
+
+FTC_HOST = os.environ.get("FTC_HOST", "192.168.43.1")
+ROBOCOL_PORT = int(os.environ.get("ROBOCOL_PORT", "20884"))
+LOCAL_PORT = int(os.environ.get("LOCAL_PORT", str(ROBOCOL_PORT)))
+TIMEOUT_SECONDS = float(os.environ.get("TIMEOUT_SECONDS", "8"))
+SEND_INTERVAL_SECONDS = float(os.environ.get("SEND_INTERVAL_SECONDS", "1.0"))
+SEND_PEER_DISCOVERY = os.environ.get("SEND_PEER_DISCOVERY", "1").lower() not in ("0", "false", "no", "off")
+SDK_BUILD_MONTH = int(os.environ.get("SDK_BUILD_MONTH", "9"))
+SDK_BUILD_YEAR = int(os.environ.get("SDK_BUILD_YEAR", "2022"))
+SDK_MAJOR_VERSION = int(os.environ.get("SDK_MAJOR_VERSION", "8"))
+SDK_MINOR_VERSION = int(os.environ.get("SDK_MINOR_VERSION", "0"))
+LOG_DIR = Path(os.environ.get("LOG_DIR", "reports"))
+
+MSG_TYPES = {
+    0: "EMPTY",
+    1: "HEARTBEAT",
+    2: "GAMEPAD",
+    3: "PEER_DISCOVERY",
+    4: "COMMAND",
+    5: "TELEMETRY",
+    6: "KEEPALIVE",
+}
+
+
+def be_u16(value):
+    return struct.pack(">H", value & 0xFFFF)
+
+
+def be_u64(value):
+    return struct.pack(">Q", value & 0xFFFFFFFFFFFFFFFF)
+
+
+def build_command(name, extra="", seq=0):
+    name_bytes = name.encode("utf-8")
+    extra_bytes = extra.encode("utf-8")
+    timestamp = time.monotonic_ns()
+    payload = (
+        be_u64(timestamp)
+        + bytes([0])
+        + be_u16(len(name_bytes))
+        + name_bytes
+        + be_u16(len(extra_bytes))
+        + extra_bytes
+    )
+    return bytes([4]) + be_u16(len(payload)) + be_u16(seq) + payload
+
+
+def build_peer_discovery(seq=0):
+    # FTC SDK 8.0 uses a historical peer-discovery frame:
+    # msg type, payload size 10, robocol version, peer type, sequence, SDK date/version, trailing 0.
+    payload = (
+        bytes([123, 1])
+        + be_u16(seq)
+        + bytes([SDK_BUILD_MONTH & 0xFF])
+        + be_u16(SDK_BUILD_YEAR)
+        + bytes([SDK_MAJOR_VERSION & 0xFF, SDK_MINOR_VERSION & 0xFF, 0])
+    )
+    return bytes([3]) + be_u16(10) + payload
+
+
+def parse_string(data, offset):
+    if offset + 2 > len(data):
+        raise ValueError("short string length")
+    length = struct.unpack(">H", data[offset : offset + 2])[0]
+    offset += 2
+    if offset + length > len(data):
+        raise ValueError("short string payload")
+    text = data[offset : offset + length].decode("utf-8", errors="replace")
+    return text, offset + length
+
+
+def parse_command(data):
+    if len(data) < 15:
+        raise ValueError("short command datagram")
+    payload_len = struct.unpack(">H", data[1:3])[0]
+    sequence = struct.unpack(">H", data[3:5])[0]
+    timestamp = struct.unpack(">Q", data[5:13])[0]
+    acknowledged = bool(data[13])
+    name, offset = parse_string(data, 14)
+    extra = ""
+    if not acknowledged and offset < len(data):
+        extra, offset = parse_string(data, offset)
+    return {
+        "acknowledged": acknowledged,
+        "payload_len": payload_len,
+        "sequence": sequence,
+        "timestamp": timestamp,
+        "name": name,
+        "extra": extra,
+        "trailing_bytes": len(data) - offset,
+    }
+
+
+def parse_datagram(data):
+    if len(data) < 5:
+        return {"error": "short datagram", "length": len(data), "hex": data.hex(" ")}
+    msg_type = data[0]
+    payload_len = struct.unpack(">H", data[1:3])[0]
+    parsed = {
+        "type": MSG_TYPES.get(msg_type, f"UNKNOWN_{msg_type}"),
+        "type_byte": msg_type,
+        "length": len(data),
+        "payload_len": payload_len,
+        "sequence": struct.unpack(">H", data[3:5])[0],
+        "hex_prefix": data[:96].hex(" "),
+    }
+    if len(data) != payload_len + 5:
+        parsed["length_warning"] = f"expected {payload_len + 5}"
+    if msg_type == 4:
+        try:
+            parsed["command"] = parse_command(data)
+            extra = parsed["command"].get("extra", "")
+            if extra.startswith("[") or extra.startswith("{"):
+                try:
+                    parsed["command"]["extra_json"] = json.loads(extra)
+                except json.JSONDecodeError:
+                    pass
+        except Exception as exc:
+            parsed["command_parse_error"] = str(exc)
+    elif msg_type == 3 and len(data) >= 13:
+        parsed["peer_discovery"] = {
+            "robocol_version": data[3],
+            "peer_type": data[4],
+            "peer_sequence": struct.unpack(">H", data[5:7])[0],
+            "sdk_build_month": data[7],
+            "sdk_build_year": struct.unpack(">H", data[8:10])[0],
+            "sdk_major_version": data[10],
+            "sdk_minor_version": data[11],
+        }
+    return parsed
+
+
+def print_json(record):
+    print(json.dumps(record, indent=2, sort_keys=True))
+
+
+def main():
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    out_dir = LOG_DIR / f"ftc-robocol-udp-{timestamp}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log_path = out_dir / "probe.jsonl"
+
+    target = (FTC_HOST, ROBOCOL_PORT)
+    deadline = time.monotonic() + TIMEOUT_SECONDS
+    next_send = 0.0
+    sequence = 0
+    received = []
+
+    print(f"date={datetime.now().isoformat(timespec='seconds')}")
+    print(f"target={FTC_HOST}:{ROBOCOL_PORT}")
+    print(f"local_port={LOCAL_PORT}")
+    print(f"send_peer_discovery={str(SEND_PEER_DISCOVERY).lower()}")
+    print("This is diagnostic only; it sends peer discovery and CMD_REQUEST_OP_MODE_LIST. It does not actuate motors.")
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    except OSError:
+        pass
+    sock.bind(("", LOCAL_PORT))
+    sock.setblocking(False)
+
+    with log_path.open("w", encoding="utf-8") as log:
+        while time.monotonic() < deadline:
+            now = time.monotonic()
+            if now >= next_send:
+                if SEND_PEER_DISCOVERY:
+                    peer_packet = build_peer_discovery(sequence)
+                    sock.sendto(peer_packet, target)
+                    event = {
+                        "event": "send",
+                        "kind": "peer_discovery",
+                        "sequence": sequence,
+                        "bytes": len(peer_packet),
+                        "hex": peer_packet.hex(" "),
+                        "time": datetime.now().isoformat(timespec="milliseconds"),
+                    }
+                    print_json(event)
+                    log.write(json.dumps(event, sort_keys=True) + "\n")
+                    log.flush()
+                    time.sleep(0.05)
+
+                packet = build_command("CMD_REQUEST_OP_MODE_LIST", "", sequence)
+                sock.sendto(packet, target)
+                event = {
+                    "event": "send",
+                    "kind": "command",
+                    "command": "CMD_REQUEST_OP_MODE_LIST",
+                    "sequence": sequence,
+                    "bytes": len(packet),
+                    "hex": packet.hex(" "),
+                    "time": datetime.now().isoformat(timespec="milliseconds"),
+                }
+                print_json(event)
+                log.write(json.dumps(event, sort_keys=True) + "\n")
+                log.flush()
+                sequence = (sequence + 1) & 0xFFFF
+                next_send = now + SEND_INTERVAL_SECONDS
+
+            remaining = max(0.0, min(0.25, deadline - time.monotonic()))
+            readable, _, _ = select.select([sock], [], [], remaining)
+            for ready in readable:
+                data, addr = ready.recvfrom(65535)
+                parsed = parse_datagram(data)
+                event = {
+                    "event": "recv",
+                    "from": f"{addr[0]}:{addr[1]}",
+                    "time": datetime.now().isoformat(timespec="milliseconds"),
+                    "datagram": parsed,
+                }
+                received.append(event)
+                print_json(event)
+                log.write(json.dumps(event, sort_keys=True) + "\n")
+                log.flush()
+
+    sock.close()
+
+    summary = {
+        "event": "summary",
+        "received_count": len(received),
+        "received_commands": [
+            event["datagram"].get("command", {}).get("name")
+            for event in received
+            if event["datagram"].get("type") == "COMMAND"
+        ],
+        "output_dir": str(out_dir),
+        "log": str(log_path),
+    }
+    print_json(summary)
+    with log_path.open("a", encoding="utf-8") as log:
+        log.write(json.dumps(summary, sort_keys=True) + "\n")
+
+    if not received:
+        return 20
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

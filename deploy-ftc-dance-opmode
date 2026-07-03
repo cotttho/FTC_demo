@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+ADB="${ADB:-$HOME/Library/Android/sdk/platform-tools/adb}"
+FTC_HOST="${FTC_HOST:-192.168.43.1}"
+FTC_ADB="${FTC_ADB:-${FTC_HOST}:5555}"
+LOCAL_OPMODE="${LOCAL_OPMODE:-onbot/DanceBotAuto.java}"
+REMOTE_DIR="${REMOTE_DIR:-/sdcard/FIRST/java/src/org/firstinspires/ftc/teamcode}"
+REMOTE_OPMODE="$REMOTE_DIR/DanceBotAuto.java"
+TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+LOG_DIR="${LOG_DIR:-reports}"
+LOG_FILE="$LOG_DIR/ftc-opmode-deploy-$TIMESTAMP.log"
+
+mkdir -p "$LOG_DIR"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./deploy-ftc-dance-opmode
+
+Assumes this Mac is already connected to the FTC Control Hub Wi-Fi. It pushes
+onbot/DanceBotAuto.java into the OnBot Java source tree.
+
+This only deploys source. It does not actuate motors and does not start the
+OpMode. Build and run still require the Robot Controller/Driver Station flow.
+USAGE
+}
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+esac
+
+run_timeout() {
+  local seconds="$1"
+  shift
+  local pid watcher status
+
+  "$@" &
+  pid="$!"
+  (
+    sleep "$seconds"
+    kill "$pid" >/dev/null 2>&1 || true
+    sleep 2
+    kill -KILL "$pid" >/dev/null 2>&1 || true
+  ) &
+  watcher="$!"
+
+  set +e
+  wait "$pid"
+  status="$?"
+  set -e
+  kill "$watcher" >/dev/null 2>&1 || true
+  wait "$watcher" >/dev/null 2>&1 || true
+  return "$status"
+}
+
+kill_local_adb_server() {
+  local pids
+  pids="$(pgrep -f 'adb .*fork-server server' || true)"
+  if [[ -n "$pids" ]]; then
+    echo "Killing local ADB server process(es): ${pids//$'\n'/ }"
+    kill -TERM $pids >/dev/null 2>&1 || true
+    sleep 1
+    kill -KILL $pids >/dev/null 2>&1 || true
+  fi
+}
+
+adb_state() {
+  local listed
+  listed="$(run_timeout 8 "$ADB" devices 2>/dev/null | awk -v target="$FTC_ADB" '$1 == target { print $2; exit }' || true)"
+  if [[ -n "$listed" ]]; then
+    printf '%s\n' "$listed"
+    return 0
+  fi
+  run_timeout 8 "$ADB" -s "$FTC_ADB" get-state 2>/dev/null || true
+}
+
+reset_adb_server() {
+  echo "Resetting local ADB server"
+  run_timeout 10 "$ADB" kill-server || {
+    echo "adb kill-server timed out or failed; terminating local ADB server directly"
+    kill_local_adb_server
+  }
+  run_timeout 10 "$ADB" start-server
+  run_timeout 10 "$ADB" disconnect "$FTC_ADB" >/dev/null 2>&1 || true
+}
+
+connect_adb() {
+  local attempt state
+
+  reset_adb_server
+
+  echo "ADB TCP port probe"
+  if ! nc -G 3 -z "${FTC_ADB%:*}" "${FTC_ADB#*:}"; then
+    echo "ADB TCP port is not reachable at $FTC_ADB."
+    exit 10
+  fi
+  echo "adb-tcp-open"
+
+  for attempt in 1 2 3 4 5; do
+    echo "ADB connect attempt $attempt"
+    run_timeout 15 "$ADB" connect "$FTC_ADB" || true
+    sleep 2
+    state="$(adb_state)"
+    echo "ADB state: ${state:-<none>}"
+    case "$state" in
+      device) return 0 ;;
+      unauthorized)
+        echo "ADB target is unauthorized; aborting before deployment."
+        run_timeout 10 "$ADB" devices -l || true
+        exit 10
+        ;;
+      offline)
+        if [[ "$attempt" -lt 5 ]]; then
+          echo "ADB target is offline; clearing local ADB state before retry."
+          reset_adb_server
+          sleep 2
+        fi
+        ;;
+    esac
+  done
+
+  echo "ADB never reached device state. If this persists after this retry logic, reboot the Control Hub."
+  run_timeout 10 "$ADB" devices -l || true
+  exit 10
+}
+
+echo "date=$(date)"
+echo "target=$FTC_ADB"
+echo "local=$LOCAL_OPMODE"
+echo "remote=$REMOTE_OPMODE"
+echo "This deploys source only; it does not actuate motors."
+
+if [[ ! -s "$LOCAL_OPMODE" ]]; then
+  echo "Missing local opmode source: $LOCAL_OPMODE"
+  exit 2
+fi
+
+connect_adb
+
+run_timeout 20 "$ADB" -s "$FTC_ADB" shell "mkdir -p '$REMOTE_DIR'"
+run_timeout 30 "$ADB" -s "$FTC_ADB" push "$LOCAL_OPMODE" "$REMOTE_OPMODE"
+run_timeout 20 "$ADB" -s "$FTC_ADB" shell "ls -l '$REMOTE_OPMODE'; wc -c '$REMOTE_OPMODE'"
+
+echo "Deployed OnBot Java source. Open /java/editor.html on the Control Hub console and build everything."
+echo "Log: $LOG_FILE"

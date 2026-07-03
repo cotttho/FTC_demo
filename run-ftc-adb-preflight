@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ADB="${ADB:-$HOME/Library/Android/sdk/platform-tools/adb}"
+FTC_ADB="${FTC_ADB:-192.168.43.1:5555}"
+HARD_RESET_ADB="${HARD_RESET_ADB:-}"
+LOG_DIR="${LOG_DIR:-reports}"
+TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+LOG_FILE="$LOG_DIR/ftc-adb-preflight-$TIMESTAMP.log"
+
+mkdir -p "$LOG_DIR"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+run_timeout() {
+  local seconds="$1"
+  shift
+  local pid watcher status
+
+  "$@" &
+  pid="$!"
+  (
+    sleep "$seconds"
+    kill "$pid" >/dev/null 2>&1 || true
+    sleep 2
+    kill -KILL "$pid" >/dev/null 2>&1 || true
+  ) &
+  watcher="$!"
+
+  set +e
+  wait "$pid"
+  status="$?"
+  set -e
+  if kill -0 "$pid" >/dev/null 2>&1; then
+    kill -KILL "$pid" >/dev/null 2>&1 || true
+    wait "$pid" >/dev/null 2>&1 || true
+  fi
+  kill "$watcher" >/dev/null 2>&1 || true
+  wait "$watcher" >/dev/null 2>&1 || true
+  return "$status"
+}
+
+kill_local_adb_server() {
+  local pids
+  pids="$(pgrep -f 'adb .*fork-server server' || true)"
+  if [[ -z "$pids" ]]; then
+    return 0
+  fi
+  echo "Killing local ADB server process(es): ${pids//$'\n'/ }"
+  kill -TERM $pids >/dev/null 2>&1 || true
+  sleep 1
+  kill -KILL $pids >/dev/null 2>&1 || true
+}
+
+reset_adb() {
+  run_timeout 10 "$ADB" start-server
+  run_timeout 10 "$ADB" disconnect "$FTC_ADB" || true
+  if [[ "$HARD_RESET_ADB" == "1" ]]; then
+    run_timeout 10 "$ADB" kill-server || {
+      echo "adb kill-server timed out or failed; terminating local ADB server directly"
+      kill_local_adb_server
+    }
+    run_timeout 10 "$ADB" start-server
+  fi
+}
+
+adb_state() {
+  run_timeout 8 "$ADB" -s "$FTC_ADB" get-state 2>/dev/null || true
+}
+
+echo "date=$(date)"
+echo "target=$FTC_ADB"
+echo "This is a no-motion ADB preflight. It will not stop the FTC app or touch motor UART commands."
+echo "Console probe"
+curl -fsS --connect-timeout 2 --max-time 4 "http://${FTC_ADB%:*}:8080/" >/dev/null && echo "console-ok"
+echo "ADB TCP port probe"
+if nc -G 3 -z "${FTC_ADB%:*}" "${FTC_ADB#*:}"; then
+  echo "adb-tcp-open"
+else
+  echo "adb-tcp-closed"
+fi
+echo "Resetting ADB connection"
+reset_adb
+
+for attempt in 1 2 3; do
+  echo "ADB connect attempt $attempt"
+  run_timeout 15 "$ADB" connect "$FTC_ADB" || true
+  sleep 2
+  state="$(adb_state)"
+  echo "ADB state: ${state:-<none>}"
+  if [[ "$state" == "device" ]]; then
+    break
+  fi
+  run_timeout 10 "$ADB" disconnect "$FTC_ADB" || true
+  reset_adb || true
+done
+
+if [[ "$(adb_state)" != "device" ]]; then
+  echo "ADB never reached device state."
+  run_timeout 10 "$ADB" devices -l || true
+  echo "Log: $LOG_FILE"
+  exit 10
+fi
+
+echo "ADB device list"
+run_timeout 10 "$ADB" devices -l
+
+echo "Control Hub shell preflight"
+run_timeout 20 "$ADB" -s "$FTC_ADB" shell "id; getprop ro.product.model; getprop ro.build.version.release; ps | grep -E 'ftc|robot|qualcomm' || true; ls -l /dev/ttyS1; command -v dalvikvm; command -v stty || true; /system/bin/toybox stty --help >/dev/null 2>&1 && echo toybox-stty-ok || true"
+
+echo "No-motion preflight completed"
+echo "Log: $LOG_FILE"

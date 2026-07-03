@@ -1,0 +1,311 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+ADB="${ADB:-$HOME/Library/Android/sdk/platform-tools/adb}"
+FTC_HOST="${FTC_HOST:-192.168.43.1}"
+FTC_PORT="${FTC_PORT:-8080}"
+FTC_ADB="${FTC_ADB:-${FTC_HOST}:5555}"
+FTC_URL="${FTC_URL:-http://${FTC_HOST}:${FTC_PORT}/}"
+RC_PACKAGE="${RC_PACKAGE:-com.qualcomm.ftcrobotcontroller}"
+CONFIG_NAME="${CONFIG_NAME:-dancebot}"
+PREF_FILE="${PREF_FILE:-${RC_PACKAGE}_preferences.xml}"
+PREF_KEY="${PREF_KEY:-pref_hardware_config_filename}"
+BUILD_DIR="${BUILD_DIR:-build/ftc-config}"
+LOG_DIR="${LOG_DIR:-reports}"
+TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+OUT_DIR="$LOG_DIR/ftc-config-activation-$TIMESTAMP"
+LOG_FILE="$OUT_DIR/probe.log"
+
+mkdir -p "$OUT_DIR" "$BUILD_DIR"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+case "${1:-}" in
+  -h|--help)
+    cat <<'USAGE'
+Usage:
+  ./probe-ftc-config-activation
+
+Assumes this Mac is already connected to the FTC Control Hub Wi-Fi. It installs
+dancebot.xml, writes the active config preference while the Robot Controller app
+is stopped, restarts the app, then captures prefs, logcat, and /hardware.
+
+This diagnostic does not actuate motors.
+USAGE
+    exit 0
+    ;;
+esac
+
+run_timeout() {
+  local seconds="$1"
+  shift
+  local pid watcher status
+
+  "$@" &
+  pid="$!"
+  (
+    sleep "$seconds"
+    kill "$pid" >/dev/null 2>&1 || true
+    sleep 2
+    kill -KILL "$pid" >/dev/null 2>&1 || true
+  ) &
+  watcher="$!"
+
+  set +e
+  wait "$pid"
+  status="$?"
+  set -e
+  kill "$watcher" >/dev/null 2>&1 || true
+  wait "$watcher" >/dev/null 2>&1 || true
+  return "$status"
+}
+
+adb_state() {
+  local listed
+  listed="$("$ADB" devices 2>/dev/null | awk -v target="$FTC_ADB" '$1 == target { print $2; exit }' || true)"
+  if [[ -n "$listed" ]]; then
+    printf '%s\n' "$listed"
+    return 0
+  fi
+  "$ADB" -s "$FTC_ADB" get-state 2>/dev/null || true
+}
+
+kill_local_adb_server() {
+  local pids
+  pids="$(pgrep -f 'adb .*fork-server server' || true)"
+  if [[ -z "$pids" ]]; then
+    return 0
+  fi
+  echo "Killing local ADB server process(es): ${pids//$'\n'/ }"
+  kill -TERM $pids >/dev/null 2>&1 || true
+  sleep 1
+  kill -KILL $pids >/dev/null 2>&1 || true
+}
+
+reset_adb_server() {
+  echo "Resetting local ADB server"
+  run_timeout 10 "$ADB" kill-server || {
+    echo "adb kill-server timed out or failed; terminating local ADB server directly"
+    kill_local_adb_server
+  }
+  run_timeout 10 "$ADB" start-server
+}
+
+abort_if_stale() {
+  case "${1:-}" in
+    offline|unauthorized)
+      echo "ADB target is ${1}; aborting before changing config."
+      run_timeout 10 "$ADB" devices -l || true
+      exit 10
+      ;;
+  esac
+}
+
+connect_adb() {
+  reset_adb_server
+
+  echo "ADB TCP port probe"
+  if nc -G 3 -z "${FTC_ADB%:*}" "${FTC_ADB#*:}"; then
+    echo "adb-tcp-open"
+  else
+    echo "ADB TCP port is not reachable at $FTC_ADB."
+    exit 10
+  fi
+
+  run_timeout 10 "$ADB" start-server
+  for attempt in 1 2 3; do
+    state="$(adb_state)"
+    if [[ "$state" == "offline" && "$attempt" == "1" ]]; then
+      echo "ADB target is offline before connect; clearing local ADB server once."
+      reset_adb_server
+      state="$(adb_state)"
+    fi
+    abort_if_stale "$state"
+    if [[ "$state" == "device" ]]; then
+      echo "ADB already in device state"
+      return 0
+    fi
+
+    echo "ADB connect attempt $attempt"
+    run_timeout 15 "$ADB" connect "$FTC_ADB" || true
+    sleep 2
+    state="$(adb_state)"
+    echo "ADB state: ${state:-<none>}"
+    abort_if_stale "$state"
+    if [[ "$state" == "device" ]]; then
+      return 0
+    fi
+  done
+
+  echo "ADB never reached device state."
+  run_timeout 10 "$ADB" devices -l || true
+  exit 10
+}
+
+ensure_root() {
+  uid="$(run_timeout 10 "$ADB" -s "$FTC_ADB" shell id -u 2>/dev/null | tr -d '\r' || true)"
+  if [[ "$uid" == "0" ]]; then
+    echo "ADB shell is already root"
+    return 0
+  fi
+
+  echo "Trying adb root"
+  run_timeout 20 "$ADB" -s "$FTC_ADB" root || true
+  sleep 3
+  run_timeout 15 "$ADB" connect "$FTC_ADB" || true
+  sleep 2
+  uid="$(run_timeout 10 "$ADB" -s "$FTC_ADB" shell id -u 2>/dev/null | tr -d '\r' || true)"
+  if [[ "$uid" != "0" ]]; then
+    echo "ADB shell is not root after adb root: ${uid:-<none>}"
+    exit 20
+  fi
+  echo "ADB shell root confirmed"
+}
+
+generate_local_config() {
+  if [[ -s "$BUILD_DIR/${CONFIG_NAME}.xml" && -s "$BUILD_DIR/${CONFIG_NAME}-prefs-after.xml" ]]; then
+    return 0
+  fi
+
+  echo "Generating local config/prefs templates"
+  GENERATE_ONLY=1 CONFIG_NAME="$CONFIG_NAME" ./install-ftc-controlhub-config
+}
+
+write_active_pref() {
+  local prefs_in="$OUT_DIR/prefs-before.xml"
+  local prefs_out="$OUT_DIR/prefs-written.xml"
+  local pref_path="/data/data/$RC_PACKAGE/shared_prefs/$PREF_FILE"
+  local remote_tmp="/data/local/tmp/${PREF_FILE}.${TIMESTAMP}.tmp"
+
+  echo "Pulling current prefs"
+  run_timeout 20 "$ADB" -s "$FTC_ADB" shell \
+    "if [ -f '$pref_path' ]; then cat '$pref_path'; else printf '%s\n' '<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\" ?><map />'; fi" \
+    >"$prefs_in"
+
+  python3 - "$prefs_in" "$prefs_out" "$PREF_KEY" "$CONFIG_NAME" <<'PY'
+import json
+import sys
+import xml.etree.ElementTree as ET
+
+prefs_in, prefs_out, pref_key, config_name = sys.argv[1:]
+active_config = json.dumps({
+    "name": config_name,
+    "resourceId": 0,
+    "location": "LOCAL_STORAGE",
+    "isDirty": False,
+}, separators=(",", ":"))
+
+try:
+    root = ET.parse(prefs_in).getroot()
+    if root.tag != "map":
+        raise ValueError("unexpected root")
+except Exception:
+    root = ET.Element("map")
+
+for child in list(root):
+    if child.tag == "string" and child.attrib.get("name") == pref_key:
+        root.remove(child)
+
+entry = ET.SubElement(root, "string", {"name": pref_key})
+entry.text = active_config
+
+tree = ET.ElementTree(root)
+ET.indent(tree, space="    ")
+tree.write(prefs_out, encoding="utf-8", xml_declaration=True, short_empty_elements=True)
+PY
+
+  if ! grep -Fq "$PREF_KEY" "$prefs_out"; then
+    echo "Generated prefs did not contain $PREF_KEY; aborting."
+    exit 30
+  fi
+
+  echo "Pushing prefs XML to temporary hub path"
+  run_timeout 30 "$ADB" -s "$FTC_ADB" push "$prefs_out" "$remote_tmp"
+  run_timeout 20 "$ADB" -s "$FTC_ADB" shell "ls -l '$remote_tmp'; wc -c '$remote_tmp'"
+
+  echo "Writing active pref while RC app is stopped"
+  run_timeout 20 "$ADB" -s "$FTC_ADB" shell \
+    "mkdir -p '/data/data/$RC_PACKAGE/shared_prefs'; if [ -f '$pref_path' ]; then cp '$pref_path' '$pref_path.bak.$TIMESTAMP'; fi"
+  run_timeout 20 "$ADB" -s "$FTC_ADB" shell \
+    "set -e; cp '$remote_tmp' '$pref_path.tmp'; set -- \$(ls -ldn '/data/data/$RC_PACKAGE'); owner=\"\$3:\$4\"; chown \"\$owner\" '$pref_path.tmp'; chmod 660 '$pref_path.tmp'; restorecon '$pref_path.tmp' 2>/dev/null || true; mv '$pref_path.tmp' '$pref_path'; restorecon '$pref_path' 2>/dev/null || true; rm -f '$remote_tmp'"
+
+  echo "--- pref immediately after write ---"
+  run_timeout 20 "$ADB" -s "$FTC_ADB" shell "grep -F '$PREF_KEY' '$pref_path' || true; ls -ln '$pref_path'"
+  run_timeout 20 "$ADB" -s "$FTC_ADB" shell "cat '$pref_path'" >"$OUT_DIR/prefs-immediate-after-write.xml"
+}
+
+capture_after_start() {
+  local pref_path="/data/data/$RC_PACKAGE/shared_prefs/$PREF_FILE"
+
+  echo "Waiting for Robot Controller startup"
+  sleep 18
+
+  echo "--- process snapshot ---"
+  run_timeout 20 "$ADB" -s "$FTC_ADB" shell "ps | grep -E 'ftc|robot|qualcomm' || true"
+
+  echo "--- pref after RC startup ---"
+  run_timeout 20 "$ADB" -s "$FTC_ADB" shell "grep -F '$PREF_KEY' '$pref_path' || true; ls -ln '$pref_path'"
+  run_timeout 20 "$ADB" -s "$FTC_ADB" shell "cat '$pref_path'" >"$OUT_DIR/prefs-after-start.xml" || true
+
+  echo "--- relevant logcat ---"
+  run_timeout 20 "$ADB" -s "$FTC_ADB" logcat -d -v time \
+    >"$OUT_DIR/logcat-full.txt" || true
+  rg -i "RobotConfig|config|hardware|XmlPull|FtcRobotControllerActivity|FtcEventLoop|Lynx|exception|falling|error|warn" "$OUT_DIR/logcat-full.txt" \
+    >"$OUT_DIR/logcat-config.txt" || true
+  sed -n '1,220p' "$OUT_DIR/logcat-config.txt" || true
+
+  echo "--- console probes ---"
+  for _ in 1 2 3 4 5; do
+    if curl -fsS --connect-timeout 2 --max-time 5 "$FTC_URL" >/dev/null; then
+      echo "console-ok"
+      break
+    fi
+    sleep 2
+  done
+  if curl -fsS --connect-timeout 2 --max-time 10 "${FTC_URL%/}/hardware" >"$OUT_DIR/hardware.js"; then
+    echo "hardware-fetched=$OUT_DIR/hardware.js"
+    if grep -Fq "motor0" "$OUT_DIR/hardware.js" && grep -Fq "motor3" "$OUT_DIR/hardware.js"; then
+      echo "hardware-shows-motor0-through-motor3"
+    else
+      echo "hardware-does-not-show-motor0-through-motor3"
+    fi
+  else
+    echo "hardware-fetch-failed"
+  fi
+}
+
+echo "date=$(date)"
+echo "target=$FTC_ADB"
+echo "console=$FTC_URL"
+echo "config=$CONFIG_NAME"
+echo "This diagnostic does not actuate motors."
+
+connect_adb
+ensure_root
+run_timeout 10 "$ADB" devices -l
+generate_local_config
+
+echo "Pushing hardware config XML"
+run_timeout 20 "$ADB" -s "$FTC_ADB" shell "mkdir -p /sdcard/FIRST"
+run_timeout 30 "$ADB" -s "$FTC_ADB" push "$BUILD_DIR/${CONFIG_NAME}.xml" "/sdcard/FIRST/${CONFIG_NAME}.xml"
+run_timeout 20 "$ADB" -s "$FTC_ADB" shell "ls -l '/sdcard/FIRST/${CONFIG_NAME}.xml'; cat '/sdcard/FIRST/${CONFIG_NAME}.xml'" >"$OUT_DIR/config-on-hub.xml"
+
+echo "Stopping FTC Robot Controller app"
+run_timeout 20 "$ADB" -s "$FTC_ADB" shell "am force-stop '$RC_PACKAGE'"
+sleep 2
+echo "--- process snapshot after force-stop ---"
+run_timeout 20 "$ADB" -s "$FTC_ADB" shell "ps | grep -E 'ftc|robot|qualcomm' || true"
+
+echo "Clearing logcat"
+run_timeout 10 "$ADB" -s "$FTC_ADB" logcat -c || true
+
+write_active_pref
+
+echo "Starting FTC Robot Controller app"
+run_timeout 20 "$ADB" -s "$FTC_ADB" shell "monkey -p '$RC_PACKAGE' -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1" || true
+
+capture_after_start
+
+echo "Output dir: $OUT_DIR"
+echo "Log: $LOG_FILE"

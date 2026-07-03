@@ -1,0 +1,360 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import select
+import signal
+import socket
+import struct
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+FTC_HOST = os.environ.get("FTC_HOST", "192.168.43.1")
+ROBOCOL_PORT = int(os.environ.get("ROBOCOL_PORT", "20884"))
+LOCAL_PORT = int(os.environ.get("LOCAL_PORT", str(ROBOCOL_PORT)))
+STOP_OPMODE = os.environ.get("STOP_OPMODE", "$Stop$Robot$")
+SDK_BUILD_MONTH = int(os.environ.get("SDK_BUILD_MONTH", "9"))
+SDK_BUILD_YEAR = int(os.environ.get("SDK_BUILD_YEAR", "2022"))
+SDK_MAJOR_VERSION = int(os.environ.get("SDK_MAJOR_VERSION", "8"))
+SDK_MINOR_VERSION = int(os.environ.get("SDK_MINOR_VERSION", "0"))
+LOG_DIR = Path(os.environ.get("LOG_DIR", "reports"))
+
+MSG_TYPES = {
+    0: "EMPTY",
+    1: "HEARTBEAT",
+    2: "GAMEPAD",
+    3: "PEER_DISCOVERY",
+    4: "COMMAND",
+    5: "TELEMETRY",
+    6: "KEEPALIVE",
+}
+
+NOISY_COMMANDS = {
+    "CMD_ROBOT_CONTROLLER_PREFERENCE",
+    "CMD_NOTIFY_USER_DEVICE_LIST",
+    "CMD_NOTIFY_ACTIVE_CONFIGURATION",
+}
+
+
+def be_u16(value):
+    return struct.pack(">H", value & 0xFFFF)
+
+
+def be_u64(value):
+    return struct.pack(">Q", value & 0xFFFFFFFFFFFFFFFF)
+
+
+def build_command(name, extra="", seq=0, timestamp=None, acknowledged=False):
+    name_bytes = name.encode("utf-8")
+    extra_bytes = extra.encode("utf-8")
+    if timestamp is None:
+        timestamp = time.monotonic_ns()
+    payload = be_u64(timestamp) + bytes([1 if acknowledged else 0]) + be_u16(len(name_bytes)) + name_bytes
+    if not acknowledged:
+        payload += be_u16(len(extra_bytes)) + extra_bytes
+    return bytes([4]) + be_u16(len(payload)) + be_u16(seq) + payload
+
+
+def build_peer_discovery(seq=0):
+    payload = (
+        bytes([123, 1])
+        + be_u16(seq)
+        + bytes([SDK_BUILD_MONTH & 0xFF])
+        + be_u16(SDK_BUILD_YEAR)
+        + bytes([SDK_MAJOR_VERSION & 0xFF, SDK_MINOR_VERSION & 0xFF, 0])
+    )
+    return bytes([3]) + be_u16(10) + payload
+
+
+def parse_string(data, offset):
+    if offset + 2 > len(data):
+        raise ValueError("short string length")
+    length = struct.unpack(">H", data[offset : offset + 2])[0]
+    offset += 2
+    if offset + length > len(data):
+        raise ValueError("short string payload")
+    return data[offset : offset + length].decode("utf-8", errors="replace"), offset + length
+
+
+def parse_command(data):
+    if len(data) < 15:
+        raise ValueError("short command datagram")
+    acknowledged = bool(data[13])
+    name, offset = parse_string(data, 14)
+    extra = ""
+    if not acknowledged and offset < len(data):
+        extra, offset = parse_string(data, offset)
+    return {
+        "payload_len": struct.unpack(">H", data[1:3])[0],
+        "sequence": struct.unpack(">H", data[3:5])[0],
+        "timestamp": struct.unpack(">Q", data[5:13])[0],
+        "acknowledged": acknowledged,
+        "name": name,
+        "extra": extra,
+        "trailing_bytes": len(data) - offset,
+    }
+
+
+def parse_datagram(data):
+    if len(data) < 5:
+        return {"type": "SHORT", "length": len(data), "hex": data.hex(" ")}
+    msg_type = data[0]
+    parsed = {
+        "type": MSG_TYPES.get(msg_type, f"UNKNOWN_{msg_type}"),
+        "type_byte": msg_type,
+        "payload_len": struct.unpack(">H", data[1:3])[0],
+        "sequence": struct.unpack(">H", data[3:5])[0],
+        "length": len(data),
+    }
+    if msg_type == 4:
+        try:
+            parsed["command"] = parse_command(data)
+        except Exception as exc:
+            parsed["command_parse_error"] = str(exc)
+    elif msg_type == 5:
+        parsed["hex_prefix"] = data[:80].hex(" ")
+    return parsed
+
+
+def summarize_extra(name, extra):
+    if not extra:
+        return ""
+    try:
+        value = json.loads(extra)
+        if name == "CMD_NOTIFY_OP_MODE_LIST":
+            return json.dumps(value, separators=(",", ":"))
+        if name == "CMD_NOTIFY_ACTIVE_CONFIGURATION":
+            return json.dumps(value, separators=(",", ":"))
+    except Exception:
+        pass
+    compact = extra.replace("\n", "\\n")
+    if len(compact) > 180:
+        compact = compact[:177] + "..."
+    return compact
+
+
+class RobocolClient:
+    def __init__(self, log_path, verbose=False):
+        self.target = (FTC_HOST, ROBOCOL_PORT)
+        self.sequence = 0
+        self.next_peer_send = 0.0
+        self.verbose = verbose
+        self.log = log_path.open("w", encoding="utf-8")
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except OSError:
+            pass
+        self.sock.bind(("", LOCAL_PORT))
+        self.sock.setblocking(False)
+
+    def close(self):
+        self.log.close()
+        self.sock.close()
+
+    def next_seq(self):
+        seq = self.sequence
+        self.sequence = (self.sequence + 1) & 0xFFFF
+        return seq
+
+    def write_event(self, event):
+        self.log.write(json.dumps(event, sort_keys=True) + "\n")
+        self.log.flush()
+
+    def send_peer_discovery(self, force=False):
+        now = time.monotonic()
+        if not force and now < self.next_peer_send:
+            return
+        seq = self.next_seq()
+        packet = build_peer_discovery(seq)
+        self.sock.sendto(packet, self.target)
+        self.next_peer_send = now + 0.75
+        self.write_event({"event": "send", "kind": "peer_discovery", "sequence": seq, "bytes": len(packet)})
+
+    def send_command(self, name, extra="", acknowledged=False, timestamp=None, quiet=False):
+        seq = self.next_seq()
+        packet = build_command(name, extra, seq, timestamp=timestamp, acknowledged=acknowledged)
+        self.sock.sendto(packet, self.target)
+        self.write_event({
+            "event": "send",
+            "kind": "command_ack" if acknowledged else "command",
+            "command": name,
+            "extra": extra,
+            "sequence": seq,
+            "bytes": len(packet),
+        })
+        if not acknowledged and not quiet:
+            suffix = f" {extra!r}" if extra else ""
+            print(f"send {name}{suffix}")
+
+    def acknowledge(self, command):
+        self.send_command(
+            command["name"],
+            acknowledged=True,
+            timestamp=command["timestamp"],
+            quiet=True,
+        )
+
+    def recv_once(self, timeout=0.25):
+        self.send_peer_discovery()
+        readable, _, _ = select.select([self.sock], [], [], timeout)
+        if not readable:
+            return None
+        data, addr = self.sock.recvfrom(65535)
+        parsed = parse_datagram(data)
+        event = {
+            "event": "recv",
+            "from": f"{addr[0]}:{addr[1]}",
+            "time": datetime.now().isoformat(timespec="milliseconds"),
+            "datagram": parsed,
+        }
+        self.write_event(event)
+        command = parsed.get("command")
+        if command and not command.get("acknowledged"):
+            self.acknowledge(command)
+            name = command.get("name")
+            if self.verbose or name not in NOISY_COMMANDS:
+                extra = summarize_extra(name, command.get("extra", ""))
+                suffix = f" {extra}" if extra else ""
+                print(f"recv {name}{suffix}")
+        elif self.verbose:
+            print(f"recv {parsed.get('type')} len={parsed.get('length')}")
+        return parsed
+
+    def wait_for_command(self, name, extra=None, timeout=8.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            parsed = self.recv_once(min(0.25, max(0.01, deadline - time.monotonic())))
+            command = (parsed or {}).get("command") or {}
+            if command.get("name") != name:
+                continue
+            if extra is None or command.get("extra") == extra:
+                return command
+        raise TimeoutError(f"Timed out waiting for {name}" + (f" {extra!r}" if extra is not None else ""))
+
+    def drain(self, seconds):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            self.recv_once(min(0.25, max(0.01, deadline - time.monotonic())))
+
+    def stop_robot(self, wait=True):
+        for _ in range(3):
+            self.send_command("CMD_INIT_OP_MODE", STOP_OPMODE)
+            self.drain(0.25)
+        if wait:
+            try:
+                self.wait_for_command("CMD_NOTIFY_INIT_OP_MODE", STOP_OPMODE, timeout=4.0)
+            except TimeoutError:
+                print("warn stop notification not observed")
+
+
+def make_out_dir(action):
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    out_dir = LOG_DIR / f"ftc-robocol-opmode-{action}-{timestamp}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir
+
+
+def run_list(client):
+    client.send_peer_discovery(force=True)
+    for _ in range(3):
+        client.send_command("CMD_REQUEST_OP_MODE_LIST")
+        try:
+            command = client.wait_for_command("CMD_NOTIFY_OP_MODE_LIST", timeout=3.0)
+            print("opmodes", summarize_extra(command["name"], command["extra"]))
+            return
+        except TimeoutError:
+            pass
+    raise TimeoutError("No CMD_NOTIFY_OP_MODE_LIST response")
+
+
+def run_smoke(client, opmode):
+    print(f"smoke target={opmode!r}")
+    client.stop_robot(wait=True)
+    client.send_command("CMD_INIT_OP_MODE", opmode)
+    client.wait_for_command("CMD_NOTIFY_INIT_OP_MODE", opmode, timeout=8.0)
+    print(f"init confirmed {opmode!r}; stopping before start")
+    client.stop_robot(wait=True)
+    print("smoke complete: init/stop path confirmed without starting the OpMode")
+
+
+def run_stop_run_test(client):
+    print(f"run-test target={STOP_OPMODE!r}")
+    client.stop_robot(wait=True)
+    client.send_command("CMD_RUN_OP_MODE", STOP_OPMODE)
+    client.wait_for_command("CMD_NOTIFY_RUN_OP_MODE", STOP_OPMODE, timeout=5.0)
+    client.stop_robot(wait=True)
+    print("run-test complete: RUN command path confirmed on Stop Robot")
+
+
+def run_bounded(client, opmode, duration):
+    print(f"bounded run target={opmode!r} duration={duration:.1f}s")
+    client.stop_robot(wait=True)
+    client.send_command("CMD_INIT_OP_MODE", opmode)
+    client.wait_for_command("CMD_NOTIFY_INIT_OP_MODE", opmode, timeout=8.0)
+    client.send_command("CMD_RUN_OP_MODE", opmode)
+    client.wait_for_command("CMD_NOTIFY_RUN_OP_MODE", opmode, timeout=5.0)
+    print("run confirmed; maintaining peer traffic until bounded stop")
+    client.drain(duration)
+    print("duration elapsed; sending Stop Robot")
+    client.stop_robot(wait=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Drive FTC RC OpMode selection over Robocol UDP.")
+    parser.add_argument("action", choices=("list", "smoke", "run-stop-test", "run-bounded"))
+    parser.add_argument("opmode", nargs="?", default="DanceBot Auto")
+    parser.add_argument("--duration", type=float, default=22.0, help="run-bounded seconds before Stop Robot")
+    parser.add_argument("--allow-motion", action="store_true", help="required for run-bounded")
+    parser.add_argument("--verbose", action="store_true")
+    args = parser.parse_args()
+
+    if args.action == "run-bounded":
+        if not args.allow_motion:
+            raise SystemExit("run-bounded requires --allow-motion")
+        if args.duration <= 0 or args.duration > 30:
+            raise SystemExit("--duration must be in 0..30 seconds")
+
+    out_dir = make_out_dir(args.action)
+    print(f"date={datetime.now().isoformat(timespec='seconds')}")
+    print(f"target={FTC_HOST}:{ROBOCOL_PORT} local_port={LOCAL_PORT}")
+    print(f"log={out_dir / 'robocol.jsonl'}")
+
+    client = RobocolClient(out_dir / "robocol.jsonl", verbose=args.verbose)
+    stop_requested = {"value": False}
+
+    def handle_signal(signum, frame):
+        stop_requested["value"] = True
+        print(f"signal {signum}; sending Stop Robot")
+        try:
+            client.stop_robot(wait=False)
+        finally:
+            raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
+    try:
+        if args.action == "list":
+            run_list(client)
+        elif args.action == "smoke":
+            run_smoke(client, args.opmode)
+        elif args.action == "run-stop-test":
+            run_stop_run_test(client)
+        elif args.action == "run-bounded":
+            try:
+                run_bounded(client, args.opmode, args.duration)
+            finally:
+                if not stop_requested["value"]:
+                    client.stop_robot(wait=False)
+        print(f"output_dir={out_dir}")
+        return 0
+    finally:
+        client.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

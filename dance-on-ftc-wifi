@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+FTC_HOST="${FTC_HOST:-192.168.43.1}"
+FTC_PORT="${FTC_PORT:-8080}"
+FTC_ADB="${FTC_ADB:-${FTC_HOST}:5555}"
+FTC_URL="${FTC_URL:-http://${FTC_HOST}:${FTC_PORT}/}"
+DURATION_MS="${DURATION_MS:-20000}"
+POWER="${POWER:-0.20}"
+
+echo "Assuming this Mac is already connected to the FTC Control Hub Wi-Fi."
+echo "Control Hub console: $FTC_URL"
+echo "ADB target: $FTC_ADB"
+echo "Duration: ${DURATION_MS} ms"
+echo "Power: $POWER"
+
+echo "Checking Control Hub console..."
+curl -fsS --connect-timeout 2 --max-time 5 "$FTC_URL" >/dev/null
+echo "console-ok"
+
+echo "Checking ADB TCP port..."
+if nc -G 3 -z "${FTC_ADB%:*}" "${FTC_ADB#*:}"; then
+  echo "adb-tcp-open"
+else
+  echo "ADB TCP port is not reachable at $FTC_ADB; aborting before any motor command."
+  exit 10
+fi
+
+echo "Starting bounded FTC dance run..."
+FTC_ADB="$FTC_ADB" DURATION_MS="$DURATION_MS" POWER="$POWER" ./run-ftc-dance-direct

@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+ADB="${ADB:-$HOME/Library/Android/sdk/platform-tools/adb}"
+FTC_HOST="${FTC_HOST:-192.168.43.1}"
+FTC_ADB="${FTC_ADB:-${FTC_HOST}:5555}"
+RC_PACKAGE="${RC_PACKAGE:-com.qualcomm.ftcrobotcontroller}"
+SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}"
+BUILD_TOOLS="${BUILD_TOOLS:-$(ls -d "$SDK_ROOT"/build-tools/* 2>/dev/null | sort -V | tail -n 1)}"
+ANDROID_JAR="${ANDROID_JAR:-$(ls "$SDK_ROOT"/platforms/android-*/android.jar 2>/dev/null | sort -V | tail -n 1)}"
+JAVAC="${JAVAC:-javac}"
+TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+LOG_DIR="${LOG_DIR:-reports}"
+OUT_DIR="$LOG_DIR/ftc-robocol-introspect-$TIMESTAMP"
+LOG_FILE="$OUT_DIR/probe.log"
+BUILD_DIR="build/ftc-robocol-introspect"
+CLASSES_DIR="$BUILD_DIR/classes"
+DEX_DIR="$BUILD_DIR/dex"
+LOCAL_JAR="$BUILD_DIR/ftc-robocol-introspect.jar"
+REMOTE_JAR="${REMOTE_JAR:-/data/local/tmp/ftc-robocol-introspect.jar}"
+
+mkdir -p "$OUT_DIR" "$CLASSES_DIR" "$DEX_DIR"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./inspect-ftc-robocol
+
+Assumes this Mac is already connected to the FTC Control Hub Wi-Fi. It builds a
+small reflection helper, runs it with the Robot Controller APK on the classpath,
+and records Robocol command/network class details.
+
+This is diagnostic only. It does not send robot commands or actuate motors.
+USAGE
+}
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+esac
+
+run_timeout() {
+  local seconds="$1"
+  shift
+  local pid watcher status
+
+  "$@" &
+  pid="$!"
+  (
+    sleep "$seconds"
+    kill "$pid" >/dev/null 2>&1 || true
+    sleep 2
+    kill -KILL "$pid" >/dev/null 2>&1 || true
+  ) &
+  watcher="$!"
+
+  set +e
+  wait "$pid"
+  status="$?"
+  set -e
+  kill "$watcher" >/dev/null 2>&1 || true
+  wait "$watcher" >/dev/null 2>&1 || true
+  return "$status"
+}
+
+kill_local_adb_server() {
+  local pids
+  pids="$(pgrep -f 'adb .*fork-server server' || true)"
+  if [[ -n "$pids" ]]; then
+    echo "Killing local ADB server process(es): ${pids//$'\n'/ }"
+    kill -TERM $pids >/dev/null 2>&1 || true
+    sleep 1
+    kill -KILL $pids >/dev/null 2>&1 || true
+  fi
+}
+
+reset_adb_server() {
+  echo "Resetting local ADB server"
+  run_timeout 10 "$ADB" kill-server || {
+    echo "adb kill-server timed out or failed; terminating local ADB server directly"
+    kill_local_adb_server
+  }
+  run_timeout 10 "$ADB" start-server
+  run_timeout 10 "$ADB" disconnect "$FTC_ADB" >/dev/null 2>&1 || true
+}
+
+adb_state() {
+  local listed
+  listed="$(run_timeout 8 "$ADB" devices 2>/dev/null | awk -v target="$FTC_ADB" '$1 == target { print $2; exit }' || true)"
+  if [[ -n "$listed" ]]; then
+    printf '%s\n' "$listed"
+    return 0
+  fi
+  run_timeout 8 "$ADB" -s "$FTC_ADB" get-state 2>/dev/null || true
+}
+
+connect_adb() {
+  local attempt state
+
+  reset_adb_server
+
+  echo "ADB TCP port probe"
+  if ! nc -G 3 -z "${FTC_ADB%:*}" "${FTC_ADB#*:}"; then
+    echo "ADB TCP port is not reachable at $FTC_ADB."
+    exit 10
+  fi
+  echo "adb-tcp-open"
+
+  for attempt in 1 2 3 4 5; do
+    echo "ADB connect attempt $attempt"
+    run_timeout 15 "$ADB" connect "$FTC_ADB" || true
+    sleep 2
+    state="$(adb_state)"
+    echo "ADB state: ${state:-<none>}"
+    case "$state" in
+      device) return 0 ;;
+      unauthorized)
+        echo "ADB target is unauthorized; aborting."
+        run_timeout 10 "$ADB" devices -l || true
+        exit 10
+        ;;
+      offline)
+        if [[ "$attempt" -lt 5 ]]; then
+          echo "ADB target is offline; clearing local ADB state before retry."
+          reset_adb_server
+          sleep 2
+        fi
+        ;;
+    esac
+  done
+
+  echo "ADB never reached device state."
+  run_timeout 10 "$ADB" devices -l || true
+  exit 10
+}
+
+echo "date=$(date)"
+echo "target=$FTC_ADB"
+echo "This is diagnostic only; no robot commands will be sent."
+
+rm -rf "$CLASSES_DIR" "$DEX_DIR" "$LOCAL_JAR"
+mkdir -p "$CLASSES_DIR" "$DEX_DIR"
+
+echo "--- building helper ---"
+"$JAVAC" -source 8 -target 8 -bootclasspath "$ANDROID_JAR" -d "$CLASSES_DIR" FtcRobocolIntrospect.java
+"$BUILD_TOOLS/d8" --min-api 23 --output "$DEX_DIR" "$CLASSES_DIR"/FtcRobocolIntrospect.class
+(cd "$DEX_DIR" && zip -q "../ftc-robocol-introspect.jar" classes.dex)
+ls -l "$LOCAL_JAR"
+
+connect_adb
+
+echo "--- pushing helper ---"
+run_timeout 30 "$ADB" -s "$FTC_ADB" push "$LOCAL_JAR" "$REMOTE_JAR"
+
+echo "--- locating Robot Controller APK ---"
+APK_PATH="$(run_timeout 15 "$ADB" -s "$FTC_ADB" shell "pm path '$RC_PACKAGE' | sed -n 's/^package://p' | head -n 1" | tr -d '\r')"
+if [[ -z "$APK_PATH" ]]; then
+  echo "Unable to locate APK path for $RC_PACKAGE."
+  exit 11
+fi
+echo "apk=$APK_PATH"
+
+echo "--- running introspection ---"
+run_timeout 45 "$ADB" -s "$FTC_ADB" shell "dalvikvm -cp '$REMOTE_JAR:$APK_PATH' FtcRobocolIntrospect" | tee "$OUT_DIR/introspection.txt"
+
+echo "Output dir: $OUT_DIR"
+echo "Log: $LOG_FILE"

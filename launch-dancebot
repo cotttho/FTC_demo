@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./launch-dancebot [auto|motor-test|list|<opmode name>]
+
+Launches a DanceBot OpMode over Robocol UDP without a Driver Station.
+Connect this computer to the Control Hub Wi-Fi before running it.
+
+Defaults:
+  auto                 Runs "DanceBot Auto"
+  DANCEBOT_DURATION   22 seconds
+
+Examples:
+  ./launch-dancebot
+  ./launch-dancebot motor-test
+  DANCEBOT_DURATION=10 ./launch-dancebot auto
+USAGE
+}
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+esac
+
+target="${1:-auto}"
+duration="${DANCEBOT_DURATION:-22}"
+
+case "$target" in
+  auto|"DanceBot Auto")
+    opmode="DanceBot Auto"
+    ;;
+  motor-test|"DanceBot Motor Test")
+    opmode="DanceBot Motor Test"
+    ;;
+  list)
+    exec ./run-ftc-opmode-robocol list
+    ;;
+  *)
+    opmode="$target"
+    ;;
+esac
+
+exec ./run-ftc-opmode-robocol run-bounded "$opmode" \
+  --duration "$duration" \
+  --allow-motion

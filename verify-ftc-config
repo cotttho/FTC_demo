@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+ADB="${ADB:-$HOME/Library/Android/sdk/platform-tools/adb}"
+FTC_HOST="${FTC_HOST:-192.168.43.1}"
+FTC_PORT="${FTC_PORT:-8080}"
+FTC_ADB="${FTC_ADB:-${FTC_HOST}:5555}"
+FTC_URL="${FTC_URL:-http://${FTC_HOST}:${FTC_PORT}/}"
+RC_PACKAGE="${RC_PACKAGE:-com.qualcomm.ftcrobotcontroller}"
+CONFIG_NAME="${CONFIG_NAME:-dancebot}"
+LOG_DIR="${LOG_DIR:-reports}"
+TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+LOG_FILE="$LOG_DIR/ftc-config-verify-$TIMESTAMP.log"
+HARDWARE_OUT="$LOG_DIR/ftc-hardware-verify-$TIMESTAMP.js"
+
+mkdir -p "$LOG_DIR"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+run_timeout() {
+  local seconds="$1"
+  shift
+  local pid watcher status
+
+  "$@" &
+  pid="$!"
+  (
+    sleep "$seconds"
+    kill "$pid" >/dev/null 2>&1 || true
+    sleep 2
+    kill -KILL "$pid" >/dev/null 2>&1 || true
+  ) &
+  watcher="$!"
+
+  set +e
+  wait "$pid"
+  status="$?"
+  set -e
+  kill "$watcher" >/dev/null 2>&1 || true
+  wait "$watcher" >/dev/null 2>&1 || true
+  return "$status"
+}
+
+adb_state() {
+  run_timeout 8 "$ADB" -s "$FTC_ADB" get-state 2>/dev/null || true
+}
+
+echo "date=$(date)"
+echo "target=$FTC_ADB"
+echo "console=$FTC_URL"
+echo "config=$CONFIG_NAME"
+echo "This is a read-only verification; it does not actuate motors."
+
+echo "ADB TCP port probe"
+if nc -G 3 -z "${FTC_ADB%:*}" "${FTC_ADB#*:}"; then
+  echo "adb-tcp-open"
+else
+  echo "ADB TCP port is not reachable at $FTC_ADB."
+  echo "Log: $LOG_FILE"
+  exit 10
+fi
+
+run_timeout 10 "$ADB" start-server
+run_timeout 15 "$ADB" connect "$FTC_ADB" || true
+sleep 2
+run_timeout 10 "$ADB" devices -l
+
+state="$(adb_state)"
+echo "ADB state: ${state:-<none>}"
+if [[ "$state" == "offline" || "$state" == "unauthorized" ]]; then
+  echo "ADB target is $state; reboot the Control Hub if it persists."
+  echo "Log: $LOG_FILE"
+  exit 10
+fi
+if [[ "$state" != "device" ]]; then
+  echo "ADB never reached device state."
+  echo "Log: $LOG_FILE"
+  exit 10
+fi
+
+uid="$(run_timeout 10 "$ADB" -s "$FTC_ADB" shell id -u 2>/dev/null | tr -d '\r' || true)"
+if [[ "$uid" != "0" ]]; then
+  echo "Trying adb root for preference verification"
+  run_timeout 20 "$ADB" -s "$FTC_ADB" root || true
+  sleep 3
+  run_timeout 15 "$ADB" connect "$FTC_ADB" || true
+  sleep 2
+fi
+
+echo "--- /sdcard/FIRST/${CONFIG_NAME}.xml ---"
+run_timeout 20 "$ADB" -s "$FTC_ADB" shell "cat '/sdcard/FIRST/${CONFIG_NAME}.xml' 2>/dev/null || echo missing-config-xml"
+
+echo "--- active config preference ---"
+run_timeout 20 "$ADB" -s "$FTC_ADB" shell "grep -R 'pref_hardware_config_filename\\|${CONFIG_NAME}' '/data/data/${RC_PACKAGE}/shared_prefs' 2>/dev/null || true"
+
+echo "--- Robot Controller process snapshot ---"
+run_timeout 20 "$ADB" -s "$FTC_ADB" shell "ps | grep -E 'ftc|robot|qualcomm' || true"
+
+echo "--- console probes ---"
+if curl -fsS --connect-timeout 2 --max-time 5 "$FTC_URL" >/dev/null; then
+  echo "console-ok"
+else
+  echo "console-not-ready"
+fi
+
+if curl -fsS --connect-timeout 2 --max-time 10 "${FTC_URL%/}/hardware" >"$HARDWARE_OUT"; then
+  echo "hardware-fetched=$HARDWARE_OUT"
+  if grep -Fq "motor0" "$HARDWARE_OUT" && grep -Fq "motor3" "$HARDWARE_OUT"; then
+    echo "hardware-shows-motor0-through-motor3"
+  else
+    echo "hardware-does-not-show-motor0-through-motor3"
+  fi
+else
+  echo "hardware-fetch-failed"
+fi
+
+echo "Log: $LOG_FILE"

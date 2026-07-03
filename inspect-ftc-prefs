@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+ADB="${ADB:-$HOME/Library/Android/sdk/platform-tools/adb}"
+FTC_HOST="${FTC_HOST:-192.168.43.1}"
+FTC_PORT="${FTC_PORT:-8080}"
+FTC_ADB="${FTC_ADB:-${FTC_HOST}:5555}"
+FTC_URL="${FTC_URL:-http://${FTC_HOST}:${FTC_PORT}/}"
+RC_PACKAGE="${RC_PACKAGE:-com.qualcomm.ftcrobotcontroller}"
+LOG_DIR="${LOG_DIR:-reports}"
+TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+LOG_FILE="$LOG_DIR/ftc-prefs-inspect-$TIMESTAMP.log"
+PREF_DUMP_DIR="$LOG_DIR/ftc-prefs-$TIMESTAMP"
+
+mkdir -p "$LOG_DIR" "$PREF_DUMP_DIR"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+run_timeout() {
+  local seconds="$1"
+  shift
+  local pid watcher status
+
+  "$@" &
+  pid="$!"
+  (
+    sleep "$seconds"
+    kill "$pid" >/dev/null 2>&1 || true
+    sleep 2
+    kill -KILL "$pid" >/dev/null 2>&1 || true
+  ) &
+  watcher="$!"
+
+  set +e
+  wait "$pid"
+  status="$?"
+  set -e
+  kill "$watcher" >/dev/null 2>&1 || true
+  wait "$watcher" >/dev/null 2>&1 || true
+  return "$status"
+}
+
+adb_state() {
+  run_timeout 8 "$ADB" -s "$FTC_ADB" get-state 2>/dev/null || true
+}
+
+echo "date=$(date)"
+echo "target=$FTC_ADB"
+echo "console=$FTC_URL"
+echo "package=$RC_PACKAGE"
+echo "This is a read-only preference/config inspection."
+
+echo "ADB TCP port probe"
+if nc -G 3 -z "${FTC_ADB%:*}" "${FTC_ADB#*:}"; then
+  echo "adb-tcp-open"
+else
+  echo "adb-tcp-closed"
+  echo "Log: $LOG_FILE"
+  exit 10
+fi
+
+run_timeout 10 "$ADB" start-server
+run_timeout 15 "$ADB" connect "$FTC_ADB" || true
+sleep 2
+run_timeout 10 "$ADB" devices -l
+
+state="$(adb_state)"
+echo "ADB state: ${state:-<none>}"
+if [[ "$state" != "device" ]]; then
+  echo "ADB did not reach device state."
+  echo "Log: $LOG_FILE"
+  exit 10
+fi
+
+uid="$(run_timeout 10 "$ADB" -s "$FTC_ADB" shell id -u 2>/dev/null | tr -d '\r' || true)"
+if [[ "$uid" != "0" ]]; then
+  echo "Trying adb root for app data inspection"
+  run_timeout 20 "$ADB" -s "$FTC_ADB" root || true
+  sleep 3
+  run_timeout 15 "$ADB" connect "$FTC_ADB" || true
+  sleep 2
+fi
+
+echo "--- identity ---"
+run_timeout 10 "$ADB" -s "$FTC_ADB" shell "id; getprop ro.debuggable; getprop ro.build.type; getprop ro.product.model"
+
+echo "--- package dirs ---"
+run_timeout 20 "$ADB" -s "$FTC_ADB" shell "ls -ld /data/data '/data/data/$RC_PACKAGE' '/data/user/0/$RC_PACKAGE' 2>/dev/null || true"
+
+echo "--- shared_prefs listing ---"
+run_timeout 20 "$ADB" -s "$FTC_ADB" shell "ls -lan '/data/data/$RC_PACKAGE/shared_prefs' 2>/dev/null || true"
+
+echo "--- shared_prefs contents ---"
+run_timeout 30 "$ADB" -s "$FTC_ADB" shell "for f in /data/data/$RC_PACKAGE/shared_prefs/*.xml; do [ -f \"\$f\" ] || continue; echo \"===== \$f\"; cat \"\$f\"; echo; done"
+
+echo "--- FIRST listing ---"
+run_timeout 20 "$ADB" -s "$FTC_ADB" shell "ls -lan /sdcard/FIRST 2>/dev/null || true; find /sdcard/FIRST -maxdepth 2 -type f 2>/dev/null | sort"
+
+echo "--- config XML files ---"
+run_timeout 30 "$ADB" -s "$FTC_ADB" shell "for f in /sdcard/FIRST/*.xml; do [ -f \"\$f\" ] || continue; echo \"===== \$f\"; cat \"\$f\"; echo; done"
+
+echo "--- grep likely config keys ---"
+run_timeout 20 "$ADB" -s "$FTC_ADB" shell "grep -R -i -n 'config\\|hardware\\|dancebot\\|FirstInspires' '/data/data/$RC_PACKAGE/shared_prefs' /sdcard/FIRST 2>/dev/null || true"
+
+echo "--- Robot Controller process snapshot ---"
+run_timeout 20 "$ADB" -s "$FTC_ADB" shell "ps | grep -E 'ftc|robot|qualcomm' || true"
+
+echo "--- console status ---"
+if curl -fsS --connect-timeout 2 --max-time 5 "$FTC_URL" >/dev/null; then
+  echo "console-ok"
+else
+  echo "console-not-ready"
+fi
+
+echo "Log: $LOG_FILE"
+echo "Dump dir: $PREF_DUMP_DIR"

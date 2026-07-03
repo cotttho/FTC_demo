@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+ADB="${ADB:-$HOME/Library/Android/sdk/platform-tools/adb}"
+FTC_HOST="${FTC_HOST:-192.168.43.1}"
+FTC_ADB="${FTC_ADB:-${FTC_HOST}:5555}"
+RC_PACKAGE="${RC_PACKAGE:-com.qualcomm.ftcrobotcontroller}"
+LOG_DIR="${LOG_DIR:-reports}"
+TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+OUT_DIR="$LOG_DIR/ftc-app-artifacts-$TIMESTAMP"
+LOG_FILE="$OUT_DIR/pull.log"
+
+mkdir -p "$OUT_DIR"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+run_timeout() {
+  local seconds="$1"
+  shift
+  local pid watcher status
+
+  "$@" &
+  pid="$!"
+  (
+    sleep "$seconds"
+    kill "$pid" >/dev/null 2>&1 || true
+    sleep 2
+    kill -KILL "$pid" >/dev/null 2>&1 || true
+  ) &
+  watcher="$!"
+
+  set +e
+  wait "$pid"
+  status="$?"
+  set -e
+  kill "$watcher" >/dev/null 2>&1 || true
+  wait "$watcher" >/dev/null 2>&1 || true
+  return "$status"
+}
+
+echo "date=$(date)"
+echo "target=$FTC_ADB"
+echo "package=$RC_PACKAGE"
+echo "output=$OUT_DIR"
+echo "This is read-only; it pulls APK and preference artifacts."
+
+if ! nc -G 3 -z "${FTC_ADB%:*}" "${FTC_ADB#*:}"; then
+  echo "ADB TCP port is not reachable."
+  exit 10
+fi
+
+run_timeout 10 "$ADB" start-server
+run_timeout 15 "$ADB" connect "$FTC_ADB" || true
+sleep 2
+run_timeout 10 "$ADB" devices -l
+
+state="$(run_timeout 8 "$ADB" -s "$FTC_ADB" get-state 2>/dev/null || true)"
+echo "state=$state"
+if [[ "$state" != "device" ]]; then
+  exit 10
+fi
+
+uid="$(run_timeout 10 "$ADB" -s "$FTC_ADB" shell id -u 2>/dev/null | tr -d '\r' || true)"
+if [[ "$uid" != "0" ]]; then
+  run_timeout 20 "$ADB" -s "$FTC_ADB" root || true
+  sleep 3
+  run_timeout 15 "$ADB" connect "$FTC_ADB" || true
+  sleep 2
+fi
+
+echo "--- package path ---"
+apk_path="$(run_timeout 10 "$ADB" -s "$FTC_ADB" shell "pm path '$RC_PACKAGE' | sed 's/^package://'" | tr -d '\r' | head -1 || true)"
+echo "apk_path=$apk_path"
+if [[ -n "$apk_path" ]]; then
+  run_timeout 60 "$ADB" -s "$FTC_ADB" pull "$apk_path" "$OUT_DIR/RobotController.apk"
+fi
+
+echo "--- preference listing ---"
+run_timeout 20 "$ADB" -s "$FTC_ADB" shell "ls -lan '/data/data/$RC_PACKAGE/shared_prefs' 2>/dev/null || true" | tee "$OUT_DIR/shared-prefs-listing.txt"
+
+echo "--- create tar of shared_prefs ---"
+run_timeout 20 "$ADB" -s "$FTC_ADB" shell "cd '/data/data/$RC_PACKAGE' && tar cf /data/local/tmp/ftc-shared-prefs.tar shared_prefs 2>/dev/null"
+run_timeout 30 "$ADB" -s "$FTC_ADB" pull /data/local/tmp/ftc-shared-prefs.tar "$OUT_DIR/ftc-shared-prefs.tar"
+tar -xf "$OUT_DIR/ftc-shared-prefs.tar" -C "$OUT_DIR"
+
+echo "--- FIRST XML listing ---"
+run_timeout 20 "$ADB" -s "$FTC_ADB" shell "ls -lan /sdcard/FIRST; find /sdcard/FIRST -maxdepth 2 -type f | sort" | tee "$OUT_DIR/first-listing.txt"
+run_timeout 20 "$ADB" -s "$FTC_ADB" pull /sdcard/FIRST/dancebot.xml "$OUT_DIR/dancebot.xml" || true
+
+echo "Artifacts: $OUT_DIR"
+echo "Log: $LOG_FILE"

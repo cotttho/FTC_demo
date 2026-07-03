@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ADB="${ADB:-$HOME/Library/Android/sdk/platform-tools/adb}"
+FTC_ADB="${FTC_ADB:-192.168.43.1:5555}"
+RC_PACKAGE="${RC_PACKAGE:-com.qualcomm.ftcrobotcontroller}"
+REMOTE_JAR="${REMOTE_JAR:-/data/local/tmp/ftc-dance.jar}"
+DURATION_MS="${DURATION_MS:-20000}"
+POWER="${POWER:-0.20}"
+HARD_RESET_ADB="${HARD_RESET_ADB:-}"
+TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+LOG_DIR="${LOG_DIR:-reports}"
+LOG_FILE="$LOG_DIR/ftc-dance-$TIMESTAMP.log"
+RC_STOPPED=0
+
+mkdir -p "$LOG_DIR"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+run_timeout() {
+  local seconds="$1"
+  shift
+  local pid watcher status
+
+  "$@" &
+  pid="$!"
+  (
+    sleep "$seconds"
+    kill "$pid" >/dev/null 2>&1 || true
+    sleep 2
+    kill -KILL "$pid" >/dev/null 2>&1 || true
+  ) &
+  watcher="$!"
+
+  set +e
+  wait "$pid"
+  status="$?"
+  set -e
+  if kill -0 "$pid" >/dev/null 2>&1; then
+    kill -KILL "$pid" >/dev/null 2>&1 || true
+    wait "$pid" >/dev/null 2>&1 || true
+  fi
+  kill "$watcher" >/dev/null 2>&1 || true
+  wait "$watcher" >/dev/null 2>&1 || true
+  return "$status"
+}
+
+kill_local_adb_server() {
+  local pids
+  pids="$(pgrep -f 'adb .*fork-server server' || true)"
+  if [[ -z "$pids" ]]; then
+    return 0
+  fi
+  echo "Killing local ADB server process(es): ${pids//$'\n'/ }"
+  kill -TERM $pids >/dev/null 2>&1 || true
+  sleep 1
+  kill -KILL $pids >/dev/null 2>&1 || true
+}
+
+reset_adb() {
+  run_timeout 10 "$ADB" start-server
+  if [[ "$HARD_RESET_ADB" == "1" ]]; then
+    run_timeout 10 "$ADB" kill-server || {
+      echo "adb kill-server timed out or failed; terminating local ADB server directly"
+      kill_local_adb_server
+    }
+    run_timeout 10 "$ADB" start-server
+  fi
+}
+
+cleanup() {
+  local status=$?
+  if [[ "$RC_STOPPED" -eq 1 ]]; then
+    echo "Restarting FTC Robot Controller app"
+    run_timeout 20 "$ADB" -s "$FTC_ADB" shell "monkey -p '$RC_PACKAGE' -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1" || true
+  fi
+  echo "Log: $LOG_FILE"
+  exit "$status"
+}
+trap cleanup EXIT
+
+adb_state() {
+  local listed
+  listed="$("$ADB" devices 2>/dev/null | awk -v target="$FTC_ADB" '$1 == target { print $2; exit }' || true)"
+  if [[ -n "$listed" ]]; then
+    printf '%s\n' "$listed"
+    return 0
+  fi
+  "$ADB" -s "$FTC_ADB" get-state 2>/dev/null || true
+}
+
+abort_if_adb_stale() {
+  local state="${1:-}"
+  case "$state" in
+    offline|unauthorized)
+      echo "ADB target is $state; aborting before any motor command. Reboot the Control Hub to refresh adbd."
+      run_timeout 10 "$ADB" devices -l || true
+      exit 10
+      ;;
+  esac
+}
+
+echo "date=$(date)"
+echo "target=$FTC_ADB"
+echo "Building FTC dance helper"
+JAR="$(./build-ftc-dance-helper)"
+
+echo "ADB TCP port probe"
+if nc -G 3 -z "${FTC_ADB%:*}" "${FTC_ADB#*:}"; then
+  echo "adb-tcp-open"
+else
+  echo "adb-tcp-closed"
+fi
+
+echo "Resetting ADB connection"
+reset_adb
+
+for attempt in 1 2 3; do
+  state="$(adb_state)"
+  abort_if_adb_stale "$state"
+  if [[ "$state" == "device" ]]; then
+    echo "ADB already in device state"
+    break
+  fi
+
+  echo "ADB connect attempt $attempt"
+  run_timeout 15 "$ADB" connect "$FTC_ADB" || true
+  sleep 2
+  state="$(adb_state)"
+  echo "ADB state: ${state:-<none>}"
+  abort_if_adb_stale "$state"
+  if [[ "$state" == "device" ]]; then
+    break
+  fi
+done
+
+if [[ "$(adb_state)" != "device" ]]; then
+  echo "ADB never reached device state; aborting before any motor command."
+  run_timeout 10 "$ADB" devices -l || true
+  exit 10
+fi
+
+run_timeout 10 "$ADB" devices -l
+echo "Pushing helper"
+run_timeout 30 "$ADB" -s "$FTC_ADB" push "$JAR" "$REMOTE_JAR"
+
+echo "Control Hub preflight"
+run_timeout 20 "$ADB" -s "$FTC_ADB" shell "id; ls -l /dev/ttyS1; command -v dalvikvm; command -v stty || true; /system/bin/toybox stty --help >/dev/null 2>&1 && echo toybox-stty-ok || true"
+
+echo "Stopping FTC Robot Controller app"
+run_timeout 20 "$ADB" -s "$FTC_ADB" shell "am force-stop '$RC_PACKAGE'"
+RC_STOPPED=1
+sleep 2
+
+echo "Starting direct 20 second motor dance"
+run_timeout 35 "$ADB" -s "$FTC_ADB" shell "dalvikvm -cp '$REMOTE_JAR' FtcDanceSerial --duration-ms '$DURATION_MS' --power '$POWER'"
+echo "Dance helper completed"
