@@ -28,23 +28,29 @@ repositories {
     mavenCentral()
 }
 
+def danceBotCommand = { List args = [] ->
+    def isWindows = System.getProperty('os.name').toLowerCase().contains('windows')
+    def launcher = isWindows ? ['cmd', '/c', 'launch-dancebot.bat'] : ['./launch-dancebot']
+    launcher + args
+}
+
 tasks.register('launchDanceBot', Exec) {
     group = 'ftc'
     description = 'Launches DanceBot Auto over Robocol UDP. Connect to Control Hub Wi-Fi first.'
     workingDir rootDir
-    commandLine './launch-dancebot'
+    commandLine danceBotCommand()
 }
 
 tasks.register('launchDanceBotMotorTest', Exec) {
     group = 'ftc'
     description = 'Launches the one-motor-at-a-time DanceBot diagnostic. Connect to Control Hub Wi-Fi first.'
     workingDir rootDir
-    commandLine './launch-dancebot', 'motor-test'
+    commandLine danceBotCommand(['motor-test'])
 }
 
 tasks.register('listDanceBotOpModes', Exec) {
     group = 'ftc'
     description = 'Lists OpModes reported by the Robot Controller. Connect to Control Hub Wi-Fi first.'
     workingDir rootDir
-    commandLine './launch-dancebot', 'list'
+    commandLine danceBotCommand(['list'])
 }

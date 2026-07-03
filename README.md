@@ -99,10 +99,16 @@ Controller app. This repo defaults to FTC SDK `11.1.0` / Robocol `124`.
 ### Launch Shortcut
 
 After manually connecting to the Control Hub Wi-Fi, you can use the shorter
-launcher:
+launcher on macOS or Linux:
 
 ```bash
 ./launch-dancebot
+```
+
+On Windows, use the batch launcher from Command Prompt or PowerShell:
+
+```bat
+.\launch-dancebot.bat
 ```
 
 The same launcher is available as Android Studio Gradle tasks:
@@ -114,7 +120,17 @@ The same launcher is available as Android Studio Gradle tasks:
 ```
 
 Use `DANCEBOT_DURATION=10 ./launch-dancebot` to change the bounded run
-duration.
+duration on macOS or Linux. On Windows Command Prompt, run
+`set DANCEBOT_DURATION=10` before the `.bat` command. In PowerShell, run
+`$env:DANCEBOT_DURATION=10` first.
+
+On Windows, the equivalent Gradle commands use `gradlew.bat`:
+
+```bat
+.\gradlew.bat launchDanceBot
+.\gradlew.bat launchDanceBotMotorTest
+.\gradlew.bat listDanceBotOpModes
+```
 
 When you are done, manually switch the Mac back to your normal Wi-Fi.
 
