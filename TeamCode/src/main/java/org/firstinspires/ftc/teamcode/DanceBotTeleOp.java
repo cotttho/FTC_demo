@@ -32,9 +32,10 @@ public class DanceBotTeleOp extends LinearOpMode {
         setRunMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
         setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
 
-        log("Initialized drive map FR=motor0 FL=motor3 BL=motor2 BR=motor1; battery=%.2fV",
+        log("Initialized arcade drive FR=motor0 BR=motor1 BL=motor2 FL=motor3; battery=%.2fV",
                 batteryVoltage());
         telemetry.addData("Status", "Ready");
+        telemetry.addData("Controls", "Right Y: speed, Left X: turn");
         telemetry.addData("Battery", "%.2f V", batteryVoltage());
         telemetry.update();
 
@@ -59,7 +60,7 @@ public class DanceBotTeleOp extends LinearOpMode {
                 setDrivePowers(leftPower, rightPower);
 
                 telemetry.addData("Mode", gamepad1.left_bumper ? "Slow" : "Normal");
-                telemetry.addData("Drive", "%.2f", drive);
+                telemetry.addData("Speed", "%.2f", drive);
                 telemetry.addData("Turn", "%.2f", turn);
                 telemetry.addData("Left", "%.2f", leftPower);
                 telemetry.addData("Right", "%.2f", rightPower);
