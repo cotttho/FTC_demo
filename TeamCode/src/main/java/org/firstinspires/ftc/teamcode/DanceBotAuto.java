@@ -5,6 +5,7 @@ import android.util.Log;
 import com.qualcomm.robotcore.eventloop.opmode.Autonomous;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.hardware.DcMotor;
+import com.qualcomm.robotcore.hardware.DcMotorSimple;
 import com.qualcomm.robotcore.hardware.VoltageSensor;
 import com.qualcomm.robotcore.util.ElapsedTime;
 import com.qualcomm.robotcore.util.RobotLog;
@@ -15,21 +16,23 @@ public class DanceBotAuto extends LinearOpMode {
     private static final double POWER = 0.35;
     private static final double STEP_SECONDS = 2.0;
 
-    private DcMotor motor0;
-    private DcMotor motor1;
-    private DcMotor motor2;
-    private DcMotor motor3;
+    private DcMotor frontRight;
+    private DcMotor frontLeft;
+    private DcMotor backLeft;
+    private DcMotor backRight;
 
     @Override
     public void runOpMode() {
-        motor0 = hardwareMap.get(DcMotor.class, "motor0");
-        motor1 = hardwareMap.get(DcMotor.class, "motor1");
-        motor2 = hardwareMap.get(DcMotor.class, "motor2");
-        motor3 = hardwareMap.get(DcMotor.class, "motor3");
+        frontRight = hardwareMap.get(DcMotor.class, "motor0");
+        frontLeft = hardwareMap.get(DcMotor.class, "motor1");
+        backLeft = hardwareMap.get(DcMotor.class, "motor2");
+        backRight = hardwareMap.get(DcMotor.class, "motor3");
 
+        setDirections();
         setRunMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
         setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
-        log("Initialized motors motor0..motor3; battery=%.2fV; waiting for start", batteryVoltage());
+        log("Initialized drive map FR=motor0 FL=motor1 BL=motor2 BR=motor3; battery=%.2fV; waiting for start",
+                batteryVoltage());
         telemetry.addData("Status", "Ready");
         telemetry.addData("Battery", "%.2f V", batteryVoltage());
         telemetry.addData("Power", "%.2f", POWER);
@@ -44,12 +47,12 @@ public class DanceBotAuto extends LinearOpMode {
                 runStep(-POWER, -POWER, -POWER, -POWER);
                 runStep( POWER, -POWER,  POWER, -POWER);
                 runStep(-POWER,  POWER, -POWER,  POWER);
-                runStep( POWER,  0.0,  -POWER, 0.0);
-                runStep( 0.0,   -POWER, 0.0,   POWER);
-                runStep( POWER, -POWER, -POWER, POWER);
-                runStep(-POWER,  POWER,  POWER, -POWER);
-                runStep( POWER,  0.0,   POWER, 0.0);
-                runStep( 0.0,   -POWER, 0.0,  -POWER);
+                runStep( 0.0,   POWER, -POWER, 0.0);
+                runStep(-POWER, 0.0,    0.0,   POWER);
+                runStep(-POWER, POWER, -POWER,  POWER);
+                runStep( POWER, -POWER, POWER, -POWER);
+                runStep( 0.0,   POWER,  0.0,   POWER);
+                runStep(-POWER, 0.0,   -POWER, 0.0);
             }
         } finally {
             stopMotors();
@@ -61,46 +64,57 @@ public class DanceBotAuto extends LinearOpMode {
         log("Dance sequence complete");
     }
 
-    private void runStep(double p0, double p1, double p2, double p3) {
+    private void runStep(double frontRightPower, double frontLeftPower,
+                         double backLeftPower, double backRightPower) {
         if (!opModeIsActive()) {
             return;
         }
 
-        setPowers(p0, p1, p2, p3);
-        log("Step powers: %.2f %.2f %.2f %.2f; battery=%.2fV", p0, p1, p2, p3, batteryVoltage());
+        setWheelPowers(frontRightPower, frontLeftPower, backLeftPower, backRightPower);
+        log("Step powers FR %.2f FL %.2f BL %.2f BR %.2f; battery=%.2fV",
+                frontRightPower, frontLeftPower, backLeftPower, backRightPower, batteryVoltage());
         ElapsedTime timer = new ElapsedTime();
         while (opModeIsActive() && timer.seconds() < STEP_SECONDS) {
             telemetry.addData("Dance", "%.1f / %.1f", timer.seconds(), STEP_SECONDS);
-            telemetry.addData("Powers", "%.2f %.2f %.2f %.2f", p0, p1, p2, p3);
+            telemetry.addData("FR FL BL BR", "%.2f %.2f %.2f %.2f",
+                    frontRightPower, frontLeftPower, backLeftPower, backRightPower);
             telemetry.addData("Battery", "%.2f V", batteryVoltage());
             telemetry.update();
             idle();
         }
     }
 
+    private void setDirections() {
+        frontRight.setDirection(DcMotorSimple.Direction.REVERSE);
+        frontLeft.setDirection(DcMotorSimple.Direction.FORWARD);
+        backLeft.setDirection(DcMotorSimple.Direction.FORWARD);
+        backRight.setDirection(DcMotorSimple.Direction.REVERSE);
+    }
+
     private void setRunMode(DcMotor.RunMode mode) {
-        motor0.setMode(mode);
-        motor1.setMode(mode);
-        motor2.setMode(mode);
-        motor3.setMode(mode);
+        frontRight.setMode(mode);
+        frontLeft.setMode(mode);
+        backLeft.setMode(mode);
+        backRight.setMode(mode);
     }
 
     private void setZeroPowerBehavior(DcMotor.ZeroPowerBehavior behavior) {
-        motor0.setZeroPowerBehavior(behavior);
-        motor1.setZeroPowerBehavior(behavior);
-        motor2.setZeroPowerBehavior(behavior);
-        motor3.setZeroPowerBehavior(behavior);
+        frontRight.setZeroPowerBehavior(behavior);
+        frontLeft.setZeroPowerBehavior(behavior);
+        backLeft.setZeroPowerBehavior(behavior);
+        backRight.setZeroPowerBehavior(behavior);
     }
 
-    private void setPowers(double p0, double p1, double p2, double p3) {
-        motor0.setPower(p0);
-        motor1.setPower(p1);
-        motor2.setPower(p2);
-        motor3.setPower(p3);
+    private void setWheelPowers(double frontRightPower, double frontLeftPower,
+                                double backLeftPower, double backRightPower) {
+        frontRight.setPower(frontRightPower);
+        frontLeft.setPower(frontLeftPower);
+        backLeft.setPower(backLeftPower);
+        backRight.setPower(backRightPower);
     }
 
     private void stopMotors() {
-        setPowers(0.0, 0.0, 0.0, 0.0);
+        setWheelPowers(0.0, 0.0, 0.0, 0.0);
     }
 
     private double batteryVoltage() {
