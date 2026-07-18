@@ -24,14 +24,14 @@ public class DanceBotAuto extends LinearOpMode {
     @Override
     public void runOpMode() {
         frontRight = hardwareMap.get(DcMotor.class, "motor0");
-        frontLeft = hardwareMap.get(DcMotor.class, "motor1");
+        frontLeft = hardwareMap.get(DcMotor.class, "motor3");
         backLeft = hardwareMap.get(DcMotor.class, "motor2");
-        backRight = hardwareMap.get(DcMotor.class, "motor3");
+        backRight = hardwareMap.get(DcMotor.class, "motor1");
 
         setDirections();
         setRunMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
         setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
-        log("Initialized drive map FR=motor0 FL=motor1 BL=motor2 BR=motor3; battery=%.2fV; waiting for start",
+        log("Initialized drive map FR=motor0 FL=motor3 BL=motor2 BR=motor1; battery=%.2fV; waiting for start",
                 batteryVoltage());
         telemetry.addData("Status", "Ready");
         telemetry.addData("Battery", "%.2f V", batteryVoltage());
@@ -92,9 +92,9 @@ public class DanceBotAuto extends LinearOpMode {
 
     private void setDirections() {
         frontRight.setDirection(DcMotorSimple.Direction.REVERSE);
-        frontLeft.setDirection(DcMotorSimple.Direction.REVERSE);
+        frontLeft.setDirection(DcMotorSimple.Direction.FORWARD);
         backLeft.setDirection(DcMotorSimple.Direction.FORWARD);
-        backRight.setDirection(DcMotorSimple.Direction.FORWARD);
+        backRight.setDirection(DcMotorSimple.Direction.REVERSE);
     }
 
     private void setRunMode(DcMotor.RunMode mode) {
