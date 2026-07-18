@@ -43,16 +43,16 @@ public class DanceBotAuto extends LinearOpMode {
 
         try {
             if (opModeIsActive()) {
-                runStep( POWER,  POWER,  POWER,  POWER);
-                runStep(-POWER, -POWER, -POWER, -POWER);
-                runStep( POWER, -POWER,  POWER, -POWER);
-                runStep(-POWER,  POWER, -POWER,  POWER);
-                runStep( 0.0,   POWER, -POWER, 0.0);
-                runStep(-POWER, 0.0,    0.0,   POWER);
-                runStep(-POWER, POWER, -POWER,  POWER);
-                runStep( POWER, -POWER, POWER, -POWER);
-                runStep( 0.0,   POWER,  0.0,   POWER);
-                runStep(-POWER, 0.0,   -POWER, 0.0);
+                runArcadeStep( POWER,  0.0);
+                runArcadeStep(-POWER,  0.0);
+                runArcadeStep( 0.0,    POWER);
+                runArcadeStep( 0.0,   -POWER);
+                runArcadeStep( POWER,  POWER);
+                runArcadeStep(-POWER, -POWER);
+                runArcadeStep( 0.0,    POWER);
+                runArcadeStep( 0.0,   -POWER);
+                runArcadeStep( POWER, -POWER);
+                runArcadeStep(-POWER,  POWER);
             }
         } finally {
             stopMotors();
@@ -64,20 +64,26 @@ public class DanceBotAuto extends LinearOpMode {
         log("Dance sequence complete");
     }
 
-    private void runStep(double frontRightPower, double frontLeftPower,
-                         double backLeftPower, double backRightPower) {
+    /** Uses the same arcade-drive convention as DanceBotTeleOp. */
+    private void runArcadeStep(double drive, double turn) {
         if (!opModeIsActive()) {
             return;
         }
 
-        setWheelPowers(frontRightPower, frontLeftPower, backLeftPower, backRightPower);
-        log("Step powers FR %.2f FL %.2f BL %.2f BR %.2f; battery=%.2fV",
-                frontRightPower, frontLeftPower, backLeftPower, backRightPower, batteryVoltage());
+        double leftPower = drive + turn;
+        double rightPower = drive - turn;
+        double maxMagnitude = Math.max(1.0, Math.max(Math.abs(leftPower), Math.abs(rightPower)));
+        leftPower /= maxMagnitude;
+        rightPower /= maxMagnitude;
+
+        setDrivePowers(leftPower, rightPower);
+        log("Arcade step drive %.2f turn %.2f; left %.2f right %.2f; battery=%.2fV",
+                drive, turn, leftPower, rightPower, batteryVoltage());
         ElapsedTime timer = new ElapsedTime();
         while (opModeIsActive() && timer.seconds() < STEP_SECONDS) {
             telemetry.addData("Dance", "%.1f / %.1f", timer.seconds(), STEP_SECONDS);
-            telemetry.addData("FR FL BL BR", "%.2f %.2f %.2f %.2f",
-                    frontRightPower, frontLeftPower, backLeftPower, backRightPower);
+            telemetry.addData("Drive / Turn", "%.2f / %.2f", drive, turn);
+            telemetry.addData("Left / Right", "%.2f / %.2f", leftPower, rightPower);
             telemetry.addData("Battery", "%.2f V", batteryVoltage());
             telemetry.update();
             idle();
@@ -86,9 +92,9 @@ public class DanceBotAuto extends LinearOpMode {
 
     private void setDirections() {
         frontRight.setDirection(DcMotorSimple.Direction.REVERSE);
-        frontLeft.setDirection(DcMotorSimple.Direction.FORWARD);
+        frontLeft.setDirection(DcMotorSimple.Direction.REVERSE);
         backLeft.setDirection(DcMotorSimple.Direction.FORWARD);
-        backRight.setDirection(DcMotorSimple.Direction.REVERSE);
+        backRight.setDirection(DcMotorSimple.Direction.FORWARD);
     }
 
     private void setRunMode(DcMotor.RunMode mode) {
@@ -111,6 +117,10 @@ public class DanceBotAuto extends LinearOpMode {
         frontLeft.setPower(frontLeftPower);
         backLeft.setPower(backLeftPower);
         backRight.setPower(backRightPower);
+    }
+
+    private void setDrivePowers(double leftPower, double rightPower) {
+        setWheelPowers(rightPower, leftPower, leftPower, rightPower);
     }
 
     private void stopMotors() {

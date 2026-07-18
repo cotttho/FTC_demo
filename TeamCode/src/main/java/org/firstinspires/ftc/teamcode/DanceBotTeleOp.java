@@ -43,12 +43,24 @@ public class DanceBotTeleOp extends LinearOpMode {
         try {
             while (opModeIsActive()) {
                 double scale = gamepad1.left_bumper ? SLOW_SCALE : NORMAL_SCALE;
-                double leftPower = Range.clip(-gamepad1.left_stick_y * scale, -1.0, 1.0);
-                double rightPower = Range.clip(-gamepad1.right_stick_y * scale, -1.0, 1.0);
+
+                // Arcade drive: point the left stick left/right to set the robot's
+                // orientation, and use the right stick up/down for speed and direction.
+                double drive = -gamepad1.right_stick_y;
+                double turn = gamepad1.left_stick_x;
+                double leftPower = drive + turn;
+                double rightPower = drive - turn;
+
+                // Preserve the requested direction when driving and turning together.
+                double maxMagnitude = Math.max(1.0, Math.max(Math.abs(leftPower), Math.abs(rightPower)));
+                leftPower = Range.clip((leftPower / maxMagnitude) * scale, -1.0, 1.0);
+                rightPower = Range.clip((rightPower / maxMagnitude) * scale, -1.0, 1.0);
 
                 setDrivePowers(leftPower, rightPower);
 
                 telemetry.addData("Mode", gamepad1.left_bumper ? "Slow" : "Normal");
+                telemetry.addData("Drive", "%.2f", drive);
+                telemetry.addData("Turn", "%.2f", turn);
                 telemetry.addData("Left", "%.2f", leftPower);
                 telemetry.addData("Right", "%.2f", rightPower);
                 telemetry.addData("Battery", "%.2f V", batteryVoltage());
@@ -64,9 +76,9 @@ public class DanceBotTeleOp extends LinearOpMode {
 
     private void setDirections() {
         frontRight.setDirection(DcMotorSimple.Direction.REVERSE);
-        frontLeft.setDirection(DcMotorSimple.Direction.FORWARD);
+        frontLeft.setDirection(DcMotorSimple.Direction.REVERSE);
         backLeft.setDirection(DcMotorSimple.Direction.FORWARD);
-        backRight.setDirection(DcMotorSimple.Direction.REVERSE);
+        backRight.setDirection(DcMotorSimple.Direction.FORWARD);
     }
 
     private void setRunMode(DcMotor.RunMode mode) {
