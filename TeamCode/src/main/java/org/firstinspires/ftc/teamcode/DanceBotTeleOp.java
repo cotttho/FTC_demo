@@ -20,21 +20,37 @@ public class DanceBotTeleOp extends LinearOpMode {
     private DcMotor frontLeft;
     private DcMotor backLeft;
     private DcMotor backRight;
+    private boolean fourMotorDrive;
 
     @Override
     public void runOpMode() {
         frontRight = hardwareMap.get(DcMotor.class, "motor0");
-        frontLeft = hardwareMap.get(DcMotor.class, "motor3");
-        backLeft = hardwareMap.get(DcMotor.class, "motor2");
-        backRight = hardwareMap.get(DcMotor.class, "motor1");
+        DcMotor motor1 = hardwareMap.get(DcMotor.class, "motor1");
+        DcMotor motor2 = hardwareMap.tryGet(DcMotor.class, "motor2");
+        DcMotor motor3 = hardwareMap.tryGet(DcMotor.class, "motor3");
+
+        if ((motor2 == null) != (motor3 == null)) {
+            throw new IllegalStateException(
+                    "Drive configuration must contain motor0/motor1 or motor0..motor3");
+        }
+
+        fourMotorDrive = motor2 != null;
+        if (fourMotorDrive) {
+            backRight = motor1;
+            backLeft = motor2;
+            frontLeft = motor3;
+        } else {
+            frontLeft = motor1;
+        }
 
         setDirections();
         setRunMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
         setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
 
-        log("Initialized arcade drive FR=motor0 BR=motor1 BL=motor2 FL=motor3; battery=%.2fV",
+        log("Initialized %s arcade drive; battery=%.2fV",
+                fourMotorDrive ? "4-motor (FR=0 BR=1 BL=2 FL=3)" : "2-motor (R=0 L=1)",
                 batteryVoltage());
-        telemetry.addData("Status", "Ready");
+        telemetry.addData("Status", "Ready (%d motors)", fourMotorDrive ? 4 : 2);
         telemetry.addData("Controls", "Right Y: speed, Left X: turn");
         telemetry.addData("Battery", "%.2f V", batteryVoltage());
         telemetry.update();
@@ -78,29 +94,37 @@ public class DanceBotTeleOp extends LinearOpMode {
     private void setDirections() {
         frontRight.setDirection(DcMotorSimple.Direction.REVERSE);
         frontLeft.setDirection(DcMotorSimple.Direction.FORWARD);
-        backLeft.setDirection(DcMotorSimple.Direction.FORWARD);
-        backRight.setDirection(DcMotorSimple.Direction.REVERSE);
+        if (fourMotorDrive) {
+            backLeft.setDirection(DcMotorSimple.Direction.FORWARD);
+            backRight.setDirection(DcMotorSimple.Direction.REVERSE);
+        }
     }
 
     private void setRunMode(DcMotor.RunMode mode) {
         frontRight.setMode(mode);
         frontLeft.setMode(mode);
-        backLeft.setMode(mode);
-        backRight.setMode(mode);
+        if (fourMotorDrive) {
+            backLeft.setMode(mode);
+            backRight.setMode(mode);
+        }
     }
 
     private void setZeroPowerBehavior(DcMotor.ZeroPowerBehavior behavior) {
         frontRight.setZeroPowerBehavior(behavior);
         frontLeft.setZeroPowerBehavior(behavior);
-        backLeft.setZeroPowerBehavior(behavior);
-        backRight.setZeroPowerBehavior(behavior);
+        if (fourMotorDrive) {
+            backLeft.setZeroPowerBehavior(behavior);
+            backRight.setZeroPowerBehavior(behavior);
+        }
     }
 
     private void setDrivePowers(double leftPower, double rightPower) {
         frontLeft.setPower(leftPower);
-        backLeft.setPower(leftPower);
         frontRight.setPower(rightPower);
-        backRight.setPower(rightPower);
+        if (fourMotorDrive) {
+            backLeft.setPower(leftPower);
+            backRight.setPower(rightPower);
+        }
     }
 
     private void stopMotors() {
