@@ -65,21 +65,28 @@ public class DanceBotTeleOp extends LinearOpMode {
                 // orientation, and use the right stick up/down for speed and direction.
                 double drive = -gamepad1.right_stick_y;
                 double turn = gamepad1.left_stick_x;
-                double leftPower = drive + turn;
-                double rightPower = drive - turn;
+                double frontLeftPower = drive + turn;
+                double frontRightPower = drive - turn;
+                double backLeftPower = drive + turn;
+                double backRightPower = drive - turn;
 
                 // Preserve the requested direction when driving and turning together.
-                double maxMagnitude = Math.max(1.0, Math.max(Math.abs(leftPower), Math.abs(rightPower)));
-                leftPower = Range.clip((leftPower / maxMagnitude) * scale, -1.0, 1.0);
-                rightPower = Range.clip((rightPower / maxMagnitude) * scale, -1.0, 1.0);
+                double leftMaxMagnitude = Math.max(1.0, Math.max(Math.abs(frontLeftPower), Math.abs(backLeftPower)));
+                frontLeftPower = Range.clip((frontLeftPower / leftMaxMagnitude) * scale, -1.0, 1.0);
+                backLeftPower = Range.clip((backLeftPower / leftMaxMagnitude) * scale, -1.0, 1.0);
+                double rightMaxMagnitude = Math.max(1.0, Math.max(Math.abs(frontRightPower), Math.abs(backRightPower)));
+                frontRightPower = Range.clip((frontRightPower / rightMaxMagnitude) * scale, -1.0, 1.0);
+                backRightPower = Range.clip((backRightPower / rightMaxMagnitude) * scale, -1.0, 1.0);
 
-                setDrivePowers(leftPower, rightPower);
+                setDrivePowers(frontLeftPower, backLeftPower, frontRightPower, backRightPower);
 
                 telemetry.addData("Mode", gamepad1.left_bumper ? "Slow" : "Normal");
                 telemetry.addData("Speed", "%.2f", drive);
                 telemetry.addData("Turn", "%.2f", turn);
-                telemetry.addData("Left", "%.2f", leftPower);
-                telemetry.addData("Right", "%.2f", rightPower);
+                telemetry.addData("Front Left", "%.2f", frontLeftPower);
+                telemetry.addData("Back Left", "%.2f", backLeftPower);
+                telemetry.addData("Front Right", "%.2f", frontRightPower);
+                telemetry.addData("Back Right", "%.2f", frontRightPower);
                 telemetry.addData("Battery", "%.2f V", batteryVoltage());
                 telemetry.update();
 
@@ -118,17 +125,17 @@ public class DanceBotTeleOp extends LinearOpMode {
         }
     }
 
-    private void setDrivePowers(double leftPower, double rightPower) {
-        frontLeft.setPower(leftPower);
-        frontRight.setPower(rightPower);
+    private void setDrivePowers(double frontLeftPower, double backLeftPower, double frontRightPower, double backRightPower) {
+        frontLeft.setPower(frontLeftPower);
+        frontRight.setPower(frontRightPower);
         if (fourMotorDrive) {
-            backLeft.setPower(leftPower);
-            backRight.setPower(rightPower);
+            backLeft.setPower(backLeftPower);
+            backRight.setPower(backRightPower);
         }
     }
 
     private void stopMotors() {
-        setDrivePowers(0.0, 0.0);
+        setDrivePowers(0.0, 0.0,  0.0,0.0);
     }
 
     private double batteryVoltage() {
