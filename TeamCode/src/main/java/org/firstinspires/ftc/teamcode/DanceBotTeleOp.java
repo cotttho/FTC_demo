@@ -15,6 +15,7 @@ public class DanceBotTeleOp extends LinearOpMode {
     private static final String TAG = "DanceBotTeleOp";
     private static final double NORMAL_SCALE = 0.60;
     private static final double SLOW_SCALE = 0.30;
+    private static final double STICK_DEAD_ZONE = 0.08;
 
     private DcMotor frontRight;
     private DcMotor frontLeft;
@@ -46,6 +47,7 @@ public class DanceBotTeleOp extends LinearOpMode {
         setDirections();
         setRunMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
         setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        stopMotors();
 
         log("Initialized %s arcade drive; battery=%.2fV",
                 fourMotorDrive ? "4-motor (FR=0 BR=1 BL=2 FL=3)" : "2-motor (R=0 L=1)",
@@ -63,30 +65,34 @@ public class DanceBotTeleOp extends LinearOpMode {
 
                 // Arcade drive: point the left stick left/right to set the robot's
                 // orientation, and use the right stick up/down for speed and direction.
-                double drive = -gamepad1.right_stick_y;
-                double turn = gamepad1.left_stick_x;
-                double frontLeftPower = drive + turn;
-                double frontRightPower = drive - turn;
-                double backLeftPower = drive + turn;
-                double backRightPower = drive - turn;
+                double drive = applyDeadZone(-gamepad1.right_stick_y);
+                double turn = applyDeadZone(gamepad1.left_stick_x);
+                double strafe = fourMotorDrive ? applyDeadZone(gamepad1.right_stick_x) : 0.0;
 
-                // Preserve the requested direction when driving and turning together.
-                double leftMaxMagnitude = Math.max(1.0, Math.max(Math.abs(frontLeftPower), Math.abs(backLeftPower)));
-                frontLeftPower = Range.clip((frontLeftPower / leftMaxMagnitude) * scale, -1.0, 1.0);
-                backLeftPower = Range.clip((backLeftPower / leftMaxMagnitude) * scale, -1.0, 1.0);
-                double rightMaxMagnitude = Math.max(1.0, Math.max(Math.abs(frontRightPower), Math.abs(backRightPower)));
-                frontRightPower = Range.clip((frontRightPower / rightMaxMagnitude) * scale, -1.0, 1.0);
-                backRightPower = Range.clip((backRightPower / rightMaxMagnitude) * scale, -1.0, 1.0);
+                double frontLeftPower = drive + strafe + turn;
+                double frontRightPower = drive - strafe - turn;
+                double backLeftPower = drive - strafe + turn;
+                double backRightPower = drive + strafe - turn;
+
+                // Normalize all four wheels together so the requested direction is preserved.
+                double maxMagnitude = Math.max(1.0,
+                        Math.max(Math.max(Math.abs(frontLeftPower), Math.abs(frontRightPower)),
+                                Math.max(Math.abs(backLeftPower), Math.abs(backRightPower))));
+                frontLeftPower = Range.clip((frontLeftPower / maxMagnitude) * scale, -1.0, 1.0);
+                frontRightPower = Range.clip((frontRightPower / maxMagnitude) * scale, -1.0, 1.0);
+                backLeftPower = Range.clip((backLeftPower / maxMagnitude) * scale, -1.0, 1.0);
+                backRightPower = Range.clip((backRightPower / maxMagnitude) * scale, -1.0, 1.0);
 
                 setDrivePowers(frontLeftPower, backLeftPower, frontRightPower, backRightPower);
 
                 telemetry.addData("Mode", gamepad1.left_bumper ? "Slow" : "Normal");
                 telemetry.addData("Speed", "%.2f", drive);
                 telemetry.addData("Turn", "%.2f", turn);
+                telemetry.addData("Strafe", "%.2f", strafe);
                 telemetry.addData("Front Left", "%.2f", frontLeftPower);
-                telemetry.addData("Back Left", "%.2f", backLeftPower);
                 telemetry.addData("Front Right", "%.2f", frontRightPower);
-                telemetry.addData("Back Right", "%.2f", frontRightPower);
+                telemetry.addData("Back Left", "%.2f", backLeftPower);
+                telemetry.addData("Back Right", "%.2f", backRightPower);
                 telemetry.addData("Battery", "%.2f V", batteryVoltage());
                 telemetry.update();
 
@@ -125,7 +131,16 @@ public class DanceBotTeleOp extends LinearOpMode {
         }
     }
 
-    private void setDrivePowers(double frontLeftPower, double backLeftPower, double frontRightPower, double backRightPower) {
+    private double applyDeadZone(double input) {
+        double magnitude = Math.abs(input);
+        if (magnitude <= STICK_DEAD_ZONE) {
+            return 0.0;
+        }
+        return Math.copySign((magnitude - STICK_DEAD_ZONE) / (1.0 - STICK_DEAD_ZONE), input);
+    }
+
+    private void setDrivePowers(double frontLeftPower, double backLeftPower,
+                                double frontRightPower, double backRightPower) {
         frontLeft.setPower(frontLeftPower);
         frontRight.setPower(frontRightPower);
         if (fourMotorDrive) {
@@ -135,7 +150,7 @@ public class DanceBotTeleOp extends LinearOpMode {
     }
 
     private void stopMotors() {
-        setDrivePowers(0.0, 0.0,  0.0,0.0);
+        setDrivePowers(0.0, 0.0, 0.0, 0.0);
     }
 
     private double batteryVoltage() {
