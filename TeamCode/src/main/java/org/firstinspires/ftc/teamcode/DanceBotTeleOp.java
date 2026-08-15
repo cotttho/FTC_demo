@@ -13,7 +13,7 @@ import com.qualcomm.robotcore.util.RobotLog;
 @TeleOp(name = "DanceBot TeleOp", group = "Demo")
 public class DanceBotTeleOp extends LinearOpMode {
     private static final String TAG = "DanceBotTeleOp";
-    private static final double NORMAL_SCALE = 0.60;
+    private static final double NORMAL_SCALE = 1.00;
     private static final double SLOW_SCALE = 0.30;
     private static final double STICK_DEAD_ZONE = 0.08;
 
@@ -21,6 +21,7 @@ public class DanceBotTeleOp extends LinearOpMode {
     private DcMotor frontLeft;
     private DcMotor backLeft;
     private DcMotor backRight;
+    private DcMotor motor4;
     private boolean fourMotorDrive;
 
     @Override
@@ -29,6 +30,7 @@ public class DanceBotTeleOp extends LinearOpMode {
         DcMotor motor1 = hardwareMap.get(DcMotor.class, "motor1");
         DcMotor motor2 = hardwareMap.tryGet(DcMotor.class, "motor2");
         DcMotor motor3 = hardwareMap.tryGet(DcMotor.class, "motor3");
+        motor4 = hardwareMap.tryGet(DcMotor.class, "motor4");
 
         if ((motor2 == null) != (motor3 == null)) {
             throw new IllegalStateException(
@@ -47,13 +49,18 @@ public class DanceBotTeleOp extends LinearOpMode {
         setDirections();
         setRunMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
         setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        if (motor4 != null) {
+            motor4.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
+            motor4.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+            motor4.setPower(0.0);
+        }
         stopMotors();
 
         log("Initialized %s arcade drive; battery=%.2fV",
                 fourMotorDrive ? "4-motor (FR=0 BR=1 BL=2 FL=3)" : "2-motor (R=0 L=1)",
                 batteryVoltage());
         telemetry.addData("Status", "Ready (%d motors)", fourMotorDrive ? 4 : 2);
-        telemetry.addData("Controls", "Right Y: speed, Left X: turn");
+        telemetry.addData("Controls", "Left stick: drive/turn; RB: motor4");
         telemetry.addData("Battery", "%.2f V", batteryVoltage());
         telemetry.update();
 
@@ -63,11 +70,12 @@ public class DanceBotTeleOp extends LinearOpMode {
             while (opModeIsActive()) {
                 double scale = gamepad1.left_bumper ? SLOW_SCALE : NORMAL_SCALE;
 
-                // Arcade drive: point the left stick left/right to set the robot's
-                // orientation, and use the right stick up/down for speed and direction.
-                double drive = applyDeadZone(-gamepad1.right_stick_y);
+                // Arcade drive: use the left stick for forward/reverse and turning.
+                // The right stick remains available for strafing in four-motor mode.
+                double drive = applyDeadZone(-gamepad1.left_stick_y);
                 double turn = applyDeadZone(gamepad1.left_stick_x);
                 double strafe = fourMotorDrive ? applyDeadZone(gamepad1.right_stick_x) : 0.0;
+                double motor4Power = motor4 != null && gamepad1.right_bumper ? scale : 0.0;
 
                 double frontLeftPower = drive + strafe + turn;
                 double frontRightPower = drive - strafe - turn;
@@ -84,6 +92,9 @@ public class DanceBotTeleOp extends LinearOpMode {
                 backRightPower = Range.clip((backRightPower / maxMagnitude) * scale, -1.0, 1.0);
 
                 setDrivePowers(frontLeftPower, backLeftPower, frontRightPower, backRightPower);
+                if (motor4 != null) {
+                    motor4.setPower(motor4Power);
+                }
 
                 telemetry.addData("Mode", gamepad1.left_bumper ? "Slow" : "Normal");
                 telemetry.addData("Speed", "%.2f", drive);
@@ -93,6 +104,7 @@ public class DanceBotTeleOp extends LinearOpMode {
                 telemetry.addData("Front Right", "%.2f", frontRightPower);
                 telemetry.addData("Back Left", "%.2f", backLeftPower);
                 telemetry.addData("Back Right", "%.2f", backRightPower);
+                telemetry.addData("Motor 4", motor4 == null ? "Not configured" : String.format("%.2f", motor4Power));
                 telemetry.addData("Battery", "%.2f V", batteryVoltage());
                 telemetry.update();
 
@@ -100,6 +112,9 @@ public class DanceBotTeleOp extends LinearOpMode {
             }
         } finally {
             stopMotors();
+            if (motor4 != null) {
+                motor4.setPower(0.0);
+            }
             log("Stopped motors");
         }
     }
