@@ -106,10 +106,10 @@ fi
 
 if curl -fsS --connect-timeout 2 --max-time 10 "${FTC_URL%/}/hardware" >"$HARDWARE_OUT"; then
   echo "hardware-fetched=$HARDWARE_OUT"
-  if grep -Fq "motor0" "$HARDWARE_OUT" && grep -Fq "motor3" "$HARDWARE_OUT"; then
-    echo "hardware-shows-motor0-through-motor3"
+  if grep -Fq "front_right" "$HARDWARE_OUT" && grep -Fq "front_left" "$HARDWARE_OUT"; then
+    echo "hardware-shows-named-drive-motors"
   else
-    echo "hardware-does-not-show-motor0-through-motor3"
+    echo "hardware-does-not-show-named-drive-motors"
   fi
 else
   echo "hardware-fetch-failed"

@@ -15,21 +15,21 @@ public class DanceBotAuto extends LinearOpMode {
     private static final double POWER = 0.35;
     private static final double STEP_SECONDS = 2.0;
 
-    private DcMotor motor0;
-    private DcMotor motor1;
-    private DcMotor motor2;
-    private DcMotor motor3;
+    private DcMotor frontRight;
+    private DcMotor backRight;
+    private DcMotor backLeft;
+    private DcMotor frontLeft;
 
     @Override
     public void runOpMode() {
-        motor0 = hardwareMap.get(DcMotor.class, "motor0");
-        motor1 = hardwareMap.get(DcMotor.class, "motor1");
-        motor2 = hardwareMap.get(DcMotor.class, "motor2");
-        motor3 = hardwareMap.get(DcMotor.class, "motor3");
+        frontRight = hardwareMap.get(DcMotor.class, "front_right");
+        backRight = hardwareMap.get(DcMotor.class, "back_right");
+        backLeft = hardwareMap.get(DcMotor.class, "back_left");
+        frontLeft = hardwareMap.get(DcMotor.class, "front_left");
 
         setRunMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
         setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
-        log("Initialized motors motor0..motor3; battery=%.2fV; waiting for start", batteryVoltage());
+        log("Initialized named drive motors; battery=%.2fV; waiting for start", batteryVoltage());
         telemetry.addData("Status", "Ready");
         telemetry.addData("Battery", "%.2f V", batteryVoltage());
         telemetry.addData("Power", "%.2f", POWER);
@@ -79,24 +79,24 @@ public class DanceBotAuto extends LinearOpMode {
     }
 
     private void setRunMode(DcMotor.RunMode mode) {
-        motor0.setMode(mode);
-        motor1.setMode(mode);
-        motor2.setMode(mode);
-        motor3.setMode(mode);
+        frontRight.setMode(mode);
+        backRight.setMode(mode);
+        backLeft.setMode(mode);
+        frontLeft.setMode(mode);
     }
 
     private void setZeroPowerBehavior(DcMotor.ZeroPowerBehavior behavior) {
-        motor0.setZeroPowerBehavior(behavior);
-        motor1.setZeroPowerBehavior(behavior);
-        motor2.setZeroPowerBehavior(behavior);
-        motor3.setZeroPowerBehavior(behavior);
+        frontRight.setZeroPowerBehavior(behavior);
+        backRight.setZeroPowerBehavior(behavior);
+        backLeft.setZeroPowerBehavior(behavior);
+        frontLeft.setZeroPowerBehavior(behavior);
     }
 
     private void setPowers(double p0, double p1, double p2, double p3) {
-        motor0.setPower(p0);
-        motor1.setPower(p1);
-        motor2.setPower(p2);
-        motor3.setPower(p3);
+        frontRight.setPower(p0);
+        backRight.setPower(p1);
+        backLeft.setPower(p2);
+        frontLeft.setPower(p3);
     }
 
     private void stopMotors() {

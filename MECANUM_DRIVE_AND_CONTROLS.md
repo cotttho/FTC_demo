@@ -38,10 +38,10 @@ from above:
 ```text
              Front
 
-      motor3       motor0
+   front_left   front_right
     front left   front right
 
-      motor2       motor1
+    back_left    back_right
      back left    back right
 
               Back
@@ -51,16 +51,16 @@ The code maps the FTC hardware names to robot positions like this:
 
 | Robot position | Hardware name | Hub/port in `dancebot.xml` |
 | --- | --- | --- |
-| Front right | `motor0` | Control Hub motor port 0 |
-| Back right | `motor1` | Control Hub motor port 1 |
-| Back left | `motor2` | Control Hub motor port 2 |
-| Front left | `motor3` | Control Hub motor port 3 |
+| Front right | `front_right` | Control Hub motor port 0 |
+| Back right | `back_right` | Control Hub motor port 1 |
+| Back left | `back_left` | Control Hub motor port 2 |
+| Front left | `front_left` | Control Hub motor port 3 |
 
 The split-hub config adds one mechanism motor:
 
 | Mechanism | Hardware name | Hub/port in `dancebot-split-hubs.xml` |
 | --- | --- | --- |
-| Extra motor | `motor4` | Expansion Hub 2 motor port 0 |
+| Intake | `intake` | Expansion Hub 2 motor port 0 |
 
 ## Driver Controls
 
@@ -69,10 +69,12 @@ The split-hub config adds one mechanism motor:
 | Driver input | Code variable | Robot behavior |
 | --- | --- | --- |
 | Left stick up/down | `drive` | Drive forward/backward |
-| Left stick left/right | `turn` | Rotate left/right |
-| Right stick left/right | `strafe` | Slide left/right |
-| Left bumper | `scale` | Slow mode at 30 percent power |
-| Right bumper | `motor4Power` | Run optional `motor4` |
+| Left stick left/right | `strafe` | Slide left/right |
+| Right stick left/right | `turn` | Rotate left/right |
+| Right bumper | `scale` | Slow mode at 30 percent power |
+| Gamepad 2 right trigger | `intakePower` | Run the intake |
+| Gamepad 2 left trigger | `intakePower` | Reverse the intake |
+| Gamepad 2 B | `intakePower` | Stop/cancel the intake |
 | No input | all drive powers become `0.0` | Robot holds still |
 
 FTC gamepads report the left stick Y axis as negative when pushed forward. The
@@ -82,21 +84,19 @@ code flips that sign so pushing the stick forward means positive drive:
 double drive = applyDeadZone(-gamepad1.left_stick_y);
 ```
 
-The left stick X axis is used for turning:
+The left stick X axis is used for strafing:
 
 ```java
-double turn = applyDeadZone(gamepad1.left_stick_x);
+double strafe = fourMotorDrive ? applyDeadZone(gamepad1.left_stick_x) : 0.0;
 ```
 
-The right stick X axis is used for strafing, but only when all four drive motors
-are configured:
+The right stick X axis is used for turning:
 
 ```java
-double strafe = fourMotorDrive ? applyDeadZone(gamepad1.right_stick_x) : 0.0;
+double turn = applyDeadZone(gamepad1.right_stick_x);
 ```
 
-This means the left stick is the main "arcade drive" control and the right stick
-adds sideways mecanum movement.
+This means the left stick translates the robot and the right stick turns it.
 
 ## Dead Zone
 
@@ -118,7 +118,7 @@ stick travel.
 Slow mode is enabled while the driver holds the left bumper:
 
 ```java
-double scale = gamepad1.left_bumper ? SLOW_SCALE : NORMAL_SCALE;
+double scale = gamepad1.right_bumper ? SLOW_SCALE : NORMAL_SCALE;
 ```
 
 The configured values are:
@@ -263,10 +263,10 @@ The mapping was built from the Control Hub ports and then corrected to match the
 physical wheel positions observed on the robot:
 
 ```text
-motor0 -> front right
-motor1 -> back right
-motor2 -> back left
-motor3 -> front left
+front_right -> front right
+back_right  -> back right
+back_left   -> back left
+front_left  -> front left
 ```
 
 After that, the TeleOp code used one consistent rule:
@@ -293,41 +293,44 @@ backRight.setPower(backRightPower);
 ```
 
 Keeping this separation matters. Hardware names can be confusing when they are
-just `motor0`, `motor1`, `motor2`, and `motor3`. The code should quickly convert
+just `front_right`, `back_right`, `back_left`, and `front_left`. The code should quickly convert
 those names into robot concepts like `frontLeft` and `backRight`, then the rest
 of the drive math can be written in terms of wheel positions.
 
 ## Two-Motor Fallback
 
-`DanceBotTeleOp` can also run if only `motor0` and `motor1` exist in the
+`DanceBotTeleOp` can also run if only `front_right` and `back_right` exist in the
 hardware configuration:
 
 ```text
-motor0 -> right side
-motor1 -> left side
+front_right -> right side
+back_right  -> left side
 ```
 
 In that mode, `fourMotorDrive` is false and `strafe` is forced to zero. The code
 still drives forward/backward and turns, but it cannot do true mecanum strafing
 because strafing requires four independently powered wheels.
 
-## Optional Motor4
+## Intake
 
-If `motor4` exists in the hardware map, the right bumper runs it:
+If `intake` exists in the hardware map, gamepad 2's triggers run it in either
+direction. Pressing B overrides the triggers and stops it:
 
 ```java
-double motor4Power = motor4 != null && gamepad1.right_bumper ? scale : 0.0;
+double intakePower = gamepad2.right_trigger - gamepad2.left_trigger;
 ```
 
 This is intentionally simple:
 
 ```text
-Right bumper held     -> motor4 runs
-Right bumper released -> motor4 stops
+Right trigger held -> intake runs
+Left trigger held  -> intake reverses
+B held             -> intake stops
+Triggers released  -> intake stops
 ```
 
 That is a safe default for an early mechanism test because the mechanism does
-not keep moving after the driver releases the button.
+not keep moving after the operator releases the trigger.
 
 ## Telemetry
 
@@ -357,10 +360,10 @@ Use this order when bringing up a mecanum robot.
 1. Lift the robot so the wheels cannot drive away.
 2. Run `DanceBot Motor Test`.
 3. Confirm each hardware name moves the expected physical wheel:
-   - `motor0` is front right.
-   - `motor1` is back right.
-   - `motor2` is back left.
-   - `motor3` is front left.
+   - `front_right` is front right.
+   - `back_right` is back right.
+   - `back_left` is back left.
+   - `front_left` is front left.
 4. Run `DanceBot TeleOp`.
 5. Push the left stick gently forward.
 6. Confirm all wheels try to move the robot forward.

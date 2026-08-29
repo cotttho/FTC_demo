@@ -135,7 +135,7 @@ On Windows, the equivalent Gradle commands use `gradlew.bat`:
 When you are done, manually switch the Mac back to your normal Wi-Fi.
 
 If the app deploys but the robot does not move, run `DanceBot Motor Test` first.
-It spins `motor0`, `motor1`, `motor2`, and `motor3` one at a time in both
+It spins `front_right`, `back_right`, `back_left`, and `front_left` one at a time in both
 directions and logs under the `DanceBotMotorTest` tag. Lift the robot or remove
 the wheels before running this diagnostic.
 
@@ -266,8 +266,9 @@ already connected to the Control Hub Wi-Fi and does not actuate motors.
 ```
 
 By default it creates and activates `dancebot.xml` with four DC motors named
-`motor0`, `motor1`, `motor2`, and `motor3` on the embedded Control Hub motor
-ports 0, 1, 2, and 3.
+`front_right`, `back_right`, `back_left`, and `front_left` on the embedded
+Control Hub motor ports 0, 1, 2, and 3, plus an `intake` motor on Expansion
+Hub 2 motor port 0.
 
 For the 312 rpm motors, the default XML tag is the generic FTC SDK motor type:
 

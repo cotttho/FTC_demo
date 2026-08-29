@@ -265,10 +265,10 @@ capture_after_start() {
   done
   if curl -fsS --connect-timeout 2 --max-time 10 "${FTC_URL%/}/hardware" >"$OUT_DIR/hardware.js"; then
     echo "hardware-fetched=$OUT_DIR/hardware.js"
-    if grep -Fq "motor0" "$OUT_DIR/hardware.js" && grep -Fq "motor3" "$OUT_DIR/hardware.js"; then
-      echo "hardware-shows-motor0-through-motor3"
+    if grep -Fq "front_right" "$OUT_DIR/hardware.js" && grep -Fq "front_left" "$OUT_DIR/hardware.js"; then
+      echo "hardware-shows-named-drive-motors"
     else
-      echo "hardware-does-not-show-motor0-through-motor3"
+      echo "hardware-does-not-show-named-drive-motors"
     fi
   else
     echo "hardware-fetch-failed"

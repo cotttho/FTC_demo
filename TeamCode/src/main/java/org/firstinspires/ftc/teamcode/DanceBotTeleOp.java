@@ -21,46 +21,47 @@ public class DanceBotTeleOp extends LinearOpMode {
     private DcMotor frontLeft;
     private DcMotor backLeft;
     private DcMotor backRight;
-    private DcMotor motor4;
+    private DcMotor intake;
     private boolean fourMotorDrive;
 
     @Override
     public void runOpMode() {
-        frontRight = hardwareMap.get(DcMotor.class, "motor0");
-        DcMotor motor1 = hardwareMap.get(DcMotor.class, "motor1");
-        DcMotor motor2 = hardwareMap.tryGet(DcMotor.class, "motor2");
-        DcMotor motor3 = hardwareMap.tryGet(DcMotor.class, "motor3");
-        motor4 = hardwareMap.tryGet(DcMotor.class, "motor4");
+        frontRight = hardwareMap.get(DcMotor.class, "front_right");
+        DcMotor configuredBackRight = hardwareMap.get(DcMotor.class, "back_right");
+        DcMotor configuredBackLeft = hardwareMap.tryGet(DcMotor.class, "back_left");
+        DcMotor configuredFrontLeft = hardwareMap.tryGet(DcMotor.class, "front_left");
+        intake = hardwareMap.tryGet(DcMotor.class, "intake");
 
-        if ((motor2 == null) != (motor3 == null)) {
+        if ((configuredBackLeft == null) != (configuredFrontLeft == null)) {
             throw new IllegalStateException(
-                    "Drive configuration must contain motor0/motor1 or motor0..motor3");
+                    "Drive configuration must contain front_right/back_right or all four named drive motors");
         }
 
-        fourMotorDrive = motor2 != null;
+        fourMotorDrive = configuredBackLeft != null;
         if (fourMotorDrive) {
-            backRight = motor1;
-            backLeft = motor2;
-            frontLeft = motor3;
+            backRight = configuredBackRight;
+            backLeft = configuredBackLeft;
+            frontLeft = configuredFrontLeft;
         } else {
-            frontLeft = motor1;
+            frontLeft = configuredBackRight;
         }
 
         setDirections();
         setRunMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
         setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
-        if (motor4 != null) {
-            motor4.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
-            motor4.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
-            motor4.setPower(0.0);
+        if (intake != null) {
+            intake.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
+            intake.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+            intake.setPower(0.0);
         }
         stopMotors();
 
-        log("Initialized %s arcade drive; battery=%.2fV",
+        log("Initialized %s robot-centric mecanum drive; battery=%.2fV",
                 fourMotorDrive ? "4-motor (FR=0 BR=1 BL=2 FL=3)" : "2-motor (R=0 L=1)",
                 batteryVoltage());
         telemetry.addData("Status", "Ready (%d motors)", fourMotorDrive ? 4 : 2);
-        telemetry.addData("Controls", "Left stick: drive/turn; RB: motor4");
+        telemetry.addData("Driver", "LS: drive/strafe; RS X: turn; RB: slow");
+        telemetry.addData("Operator", "RT: intake; LT: reverse; B: stop");
         telemetry.addData("Battery", "%.2f V", batteryVoltage());
         telemetry.update();
 
@@ -68,14 +69,19 @@ public class DanceBotTeleOp extends LinearOpMode {
 
         try {
             while (opModeIsActive()) {
-                double scale = gamepad1.left_bumper ? SLOW_SCALE : NORMAL_SCALE;
+                double scale = gamepad1.right_bumper ? SLOW_SCALE : NORMAL_SCALE;
 
-                // Arcade drive: use the left stick for forward/reverse and turning.
-                // The right stick remains available for strafing in four-motor mode.
+                // Recommended robot-centric mecanum map: left stick translates,
+                // while right-stick X rotates the robot.
                 double drive = applyDeadZone(-gamepad1.left_stick_y);
-                double turn = applyDeadZone(gamepad1.left_stick_x);
-                double strafe = fourMotorDrive ? applyDeadZone(gamepad1.right_stick_x) : 0.0;
-                double motor4Power = motor4 != null && gamepad1.right_bumper ? scale : 0.0;
+                double strafe = fourMotorDrive ? applyDeadZone(gamepad1.left_stick_x) : 0.0;
+                double turn = applyDeadZone(gamepad1.right_stick_x);
+
+                double intakePower = 0.0;
+                if (intake != null && !gamepad2.b) {
+                    intakePower = applyDeadZone(gamepad2.right_trigger)
+                            - applyDeadZone(gamepad2.left_trigger);
+                }
 
                 double frontLeftPower = drive + strafe + turn;
                 double frontRightPower = drive - strafe - turn;
@@ -92,11 +98,11 @@ public class DanceBotTeleOp extends LinearOpMode {
                 backRightPower = Range.clip((backRightPower / maxMagnitude) * scale, -1.0, 1.0);
 
                 setDrivePowers(frontLeftPower, backLeftPower, frontRightPower, backRightPower);
-                if (motor4 != null) {
-                    motor4.setPower(motor4Power);
+                if (intake != null) {
+                    intake.setPower(intakePower);
                 }
 
-                telemetry.addData("Mode", gamepad1.left_bumper ? "Slow" : "Normal");
+                telemetry.addData("Mode", gamepad1.right_bumper ? "Slow" : "Normal");
                 telemetry.addData("Speed", "%.2f", drive);
                 telemetry.addData("Turn", "%.2f", turn);
                 telemetry.addData("Strafe", "%.2f", strafe);
@@ -104,7 +110,7 @@ public class DanceBotTeleOp extends LinearOpMode {
                 telemetry.addData("Front Right", "%.2f", frontRightPower);
                 telemetry.addData("Back Left", "%.2f", backLeftPower);
                 telemetry.addData("Back Right", "%.2f", backRightPower);
-                telemetry.addData("Motor 4", motor4 == null ? "Not configured" : String.format("%.2f", motor4Power));
+                telemetry.addData("Intake", intake == null ? "Not configured" : String.format("%.2f", intakePower));
                 telemetry.addData("Battery", "%.2f V", batteryVoltage());
                 telemetry.update();
 
@@ -112,19 +118,19 @@ public class DanceBotTeleOp extends LinearOpMode {
             }
         } finally {
             stopMotors();
-            if (motor4 != null) {
-                motor4.setPower(0.0);
+            if (intake != null) {
+                intake.setPower(0.0);
             }
             log("Stopped motors");
         }
     }
 
     private void setDirections() {
-        frontRight.setDirection(DcMotorSimple.Direction.REVERSE);
+        frontRight.setDirection(DcMotorSimple.Direction.FORWARD);
         frontLeft.setDirection(DcMotorSimple.Direction.FORWARD);
         if (fourMotorDrive) {
-            backLeft.setDirection(DcMotorSimple.Direction.FORWARD);
-            backRight.setDirection(DcMotorSimple.Direction.REVERSE);
+            backLeft.setDirection(DcMotorSimple.Direction.REVERSE);
+            backRight.setDirection(DcMotorSimple.Direction.FORWARD);
         }
     }
 

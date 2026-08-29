@@ -17,10 +17,10 @@ ten 2-second motor-power steps. Each step sends a different power pattern to
 four motors named:
 
 ```text
-motor0
-motor1
-motor2
-motor3
+front_right
+back_right
+back_left
+front_left
 ```
 
 The power is intentionally modest:
@@ -65,11 +65,11 @@ FTC code does not talk directly to motor ports by number. It asks the hardware
 map for configured devices by name:
 
 ```java
-hardwareMap.get(DcMotor.class, "motor0")
+hardwareMap.get(DcMotor.class, "front_right")
 ```
 
 The Control Hub configuration must contain motors with the exact names
-`motor0`, `motor1`, `motor2`, and `motor3`.
+`front_right`, `back_right`, `back_left`, and `front_left`.
 
 ### Motor Power
 

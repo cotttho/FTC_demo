@@ -21,7 +21,7 @@ public class DanceBotMotorTest extends LinearOpMode {
 
     @Override
     public void runOpMode() {
-        names = new String[] {"motor0", "motor1", "motor2", "motor3"};
+        names = new String[] {"front_right", "back_right", "back_left", "front_left"};
         motors = new DcMotor[names.length];
 
         for (int i = 0; i < names.length; i++) {
