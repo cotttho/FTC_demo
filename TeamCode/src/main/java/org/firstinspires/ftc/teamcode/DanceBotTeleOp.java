@@ -60,8 +60,8 @@ public class DanceBotTeleOp extends LinearOpMode {
                 fourMotorDrive ? "4-motor (FR=0 BR=1 BL=2 FL=3)" : "2-motor (R=0 L=1)",
                 batteryVoltage());
         telemetry.addData("Status", "Ready (%d motors)", fourMotorDrive ? 4 : 2);
-        telemetry.addData("Driver", "LS: drive/strafe; RS X: turn; RB: slow");
-        telemetry.addData("Operator", "RT: intake; LT: reverse; B: stop");
+        telemetry.addData("Drive", "LS: drive/strafe; RS X: turn; RB: slow");
+        telemetry.addData("Operator", "Gamepad 2 RT: intake; LT: reverse; B: intake stop");
         telemetry.addData("Battery", "%.2f V", batteryVoltage());
         telemetry.update();
 
