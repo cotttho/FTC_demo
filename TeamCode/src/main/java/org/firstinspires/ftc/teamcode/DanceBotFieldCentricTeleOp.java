@@ -91,8 +91,8 @@ public class DanceBotFieldCentricTeleOp extends LinearOpMode {
                 // Rotate the field-relative stick vector into the robot's coordinate frame.
                 double cosYaw = Math.cos(yawRadians);
                 double sinYaw = Math.sin(yawRadians);
-                double robotForward = fieldForward * cosYaw + fieldStrafe * sinYaw;
-                double robotStrafe = -fieldForward * sinYaw + fieldStrafe * cosYaw;
+                double robotForward = fieldForward * cosYaw - fieldStrafe * sinYaw;
+                double robotStrafe = fieldForward * sinYaw + fieldStrafe * cosYaw;
 
                 double intakePower = 0.0;
                 if (intake != null && !gamepad2.b) {
