@@ -126,11 +126,19 @@ public class DanceBotTeleOp extends LinearOpMode {
     }
 
     private void setDirections() {
-        frontRight.setDirection(DcMotorSimple.Direction.FORWARD);
-        frontLeft.setDirection(DcMotorSimple.Direction.FORWARD);
         if (fourMotorDrive) {
+            frontRight.setDirection(DcMotorSimple.Direction.FORWARD);
+            frontLeft.setDirection(DcMotorSimple.Direction.FORWARD);
             backLeft.setDirection(DcMotorSimple.Direction.REVERSE);
             backRight.setDirection(DcMotorSimple.Direction.FORWARD);
+        } else {
+            // Two-wheel DanceBot (config: dancebot-2wd.xml). Both motors sit on one
+            // crossbar with shafts pointing outward, so they are mirror images.
+            // Measured with DanceBot Motor Test (raw positive power, no direction set):
+            //   port 0 (front_right, right side): positive rolls BACKWARD -> REVERSE
+            //   port 1 (back_right,  left side):  positive rolls FORWARD  -> FORWARD
+            frontRight.setDirection(DcMotorSimple.Direction.REVERSE);
+            frontLeft.setDirection(DcMotorSimple.Direction.FORWARD);
         }
     }
 

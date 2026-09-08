@@ -311,6 +311,11 @@ In that mode, `fourMotorDrive` is false and `strafe` is forced to zero. The code
 still drives forward/backward and turns, but it cannot do true mecanum strafing
 because strafing requires four independently powered wheels.
 
+`dancebot-2wd.xml` is a ready-made configuration for this layout. On the
+two-wheel DanceBot the two motors are mirror images of each other, so
+`front_right` is set to `REVERSE` and `back_right` to `FORWARD` (measured with
+`DanceBot Motor Test`).
+
 ## Intake
 
 If `intake` exists in the hardware map, gamepad 2's triggers run it in either

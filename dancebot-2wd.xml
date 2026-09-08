@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Two-wheel DanceBot: one motor per side, chain-driven, on the Control Hub only.
+  DanceBotTeleOp detects this layout because back_left/front_left are absent and
+  runs in two-motor mode: front_right drives the right side, back_right the left.
+-->
+<Robot type="FirstInspires-FTC">
+    <LynxUsbDevice name="Control Hub Portal" serialNumber="(embedded)" parentModuleAddress="173">
+        <LynxModule name="Control Hub" port="173">
+            <Motor name="front_right" port="0" />
+            <Motor name="back_right" port="1" />
+            <ControlHubImuBHI260AP name="imu" port="0" bus="0" />
+        </LynxModule>
+    </LynxUsbDevice>
+</Robot>
