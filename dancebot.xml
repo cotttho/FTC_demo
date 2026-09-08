@@ -6,6 +6,7 @@
             <Motor name="back_right" port="1" />
             <Motor name="back_left" port="2" />
             <Motor name="front_left" port="3" />
+            <ControlHubImuBHI260AP name="imu" port="0" bus="0" />
         </LynxModule>
     </LynxUsbDevice>
 </Robot>
