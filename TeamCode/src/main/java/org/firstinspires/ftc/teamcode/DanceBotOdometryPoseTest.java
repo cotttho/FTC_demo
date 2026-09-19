@@ -7,11 +7,12 @@ import com.qualcomm.robotcore.hardware.DcMotor;
 /** Read-only three-wheel odometry validation using the calibrated DanceBot pods. */
 @TeleOp(name = "DanceBot Odometry Pose Test", group = "Diagnostics")
 public class DanceBotOdometryPoseTest extends LinearOpMode {
+    // Measured from three 48-inch translation trials and three 360-degree turns.
     private static final double PARALLEL_TICKS_PER_INCH = 1757.55;
     private static final double CENTER_TICKS_PER_INCH = 1768.34;
-    private static final double LEFT_POD_Y_INCHES = 4.14;
-    private static final double RIGHT_POD_Y_INCHES = -4.14;
-    private static final double CENTER_POD_X_INCHES = 0.0;
+    private static final double LEFT_POD_Y_INCHES = 4.1395;
+    private static final double RIGHT_POD_Y_INCHES = -4.1395;
+    private static final double CENTER_POD_X_INCHES = 0.0107;
 
     private DcMotor leftPod;
     private DcMotor rightPod;
