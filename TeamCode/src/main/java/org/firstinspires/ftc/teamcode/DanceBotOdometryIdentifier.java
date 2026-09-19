@@ -13,13 +13,15 @@ public class DanceBotOdometryIdentifier extends LinearOpMode {
     private static final String[] PORT_LABELS = {
             "Port 0 / front_right",
             "Port 1 / back_right",
-            "Port 2 / back_left"
+            "Port 2 / back_left",
+            "Port 3 / front_left"
     };
 
     private static final String[] MOTOR_NAMES = {
             "front_right",
             "back_right",
-            "back_left"
+            "back_left",
+            "front_left"
     };
 
     @Override
@@ -30,6 +32,7 @@ public class DanceBotOdometryIdentifier extends LinearOpMode {
         for (int i = 0; i < MOTOR_NAMES.length; i++) {
             encoderPorts[i] = hardwareMap.get(DcMotor.class, MOTOR_NAMES[i]);
             encoderPorts[i].setPower(0.0);
+            encoderPorts[i].setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
             baseline[i] = encoderPorts[i].getCurrentPosition();
         }
 
