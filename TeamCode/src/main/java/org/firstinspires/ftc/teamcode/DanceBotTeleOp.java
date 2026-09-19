@@ -128,7 +128,7 @@ public class DanceBotTeleOp extends LinearOpMode {
     private void setDirections() {
         if (fourMotorDrive) {
             frontRight.setDirection(DcMotorSimple.Direction.FORWARD);
-            frontLeft.setDirection(DcMotorSimple.Direction.FORWARD);
+            frontLeft.setDirection(DcMotorSimple.Direction.REVERSE);
             backLeft.setDirection(DcMotorSimple.Direction.REVERSE);
             backRight.setDirection(DcMotorSimple.Direction.FORWARD);
         } else {
