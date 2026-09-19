@@ -19,31 +19,31 @@ public class DanceBotTeleOp extends LinearOpMode {
 
     private DcMotor frontRight;
     private DcMotor frontLeft;
-    private DcMotor backLeft;
-    private DcMotor backRight;
+    private DcMotor rearLeft;
+    private DcMotor rearRight;
     private DcMotor intake;
     private boolean fourMotorDrive;
 
     @Override
     public void runOpMode() {
         frontRight = hardwareMap.get(DcMotor.class, "front_right");
-        DcMotor configuredBackRight = hardwareMap.get(DcMotor.class, "back_right");
-        DcMotor configuredBackLeft = hardwareMap.tryGet(DcMotor.class, "back_left");
+        DcMotor configuredRearRight = hardwareMap.get(DcMotor.class, "rear_right");
+        DcMotor configuredRearLeft = hardwareMap.tryGet(DcMotor.class, "rear_left");
         DcMotor configuredFrontLeft = hardwareMap.tryGet(DcMotor.class, "front_left");
         intake = hardwareMap.tryGet(DcMotor.class, "intake");
 
-        if ((configuredBackLeft == null) != (configuredFrontLeft == null)) {
+        if ((configuredRearLeft == null) != (configuredFrontLeft == null)) {
             throw new IllegalStateException(
-                    "Drive configuration must contain front_right/back_right or all four named drive motors");
+                    "Drive configuration must contain front_right/rear_right or all four named drive motors");
         }
 
-        fourMotorDrive = configuredBackLeft != null;
+        fourMotorDrive = configuredRearLeft != null;
         if (fourMotorDrive) {
-            backRight = configuredBackRight;
-            backLeft = configuredBackLeft;
+            rearRight = configuredRearRight;
+            rearLeft = configuredRearLeft;
             frontLeft = configuredFrontLeft;
         } else {
-            frontLeft = configuredBackRight;
+            frontLeft = configuredRearRight;
         }
 
         setDirections();
@@ -85,19 +85,19 @@ public class DanceBotTeleOp extends LinearOpMode {
 
                 double frontLeftPower = drive + strafe + turn;
                 double frontRightPower = drive - strafe - turn;
-                double backLeftPower = drive - strafe + turn;
-                double backRightPower = drive + strafe - turn;
+                double rearLeftPower = drive - strafe + turn;
+                double rearRightPower = drive + strafe - turn;
 
                 // Normalize all four wheels together so the requested direction is preserved.
                 double maxMagnitude = Math.max(1.0,
                         Math.max(Math.max(Math.abs(frontLeftPower), Math.abs(frontRightPower)),
-                                Math.max(Math.abs(backLeftPower), Math.abs(backRightPower))));
+                                Math.max(Math.abs(rearLeftPower), Math.abs(rearRightPower))));
                 frontLeftPower = Range.clip((frontLeftPower / maxMagnitude) * scale, -1.0, 1.0);
                 frontRightPower = Range.clip((frontRightPower / maxMagnitude) * scale, -1.0, 1.0);
-                backLeftPower = Range.clip((backLeftPower / maxMagnitude) * scale, -1.0, 1.0);
-                backRightPower = Range.clip((backRightPower / maxMagnitude) * scale, -1.0, 1.0);
+                rearLeftPower = Range.clip((rearLeftPower / maxMagnitude) * scale, -1.0, 1.0);
+                rearRightPower = Range.clip((rearRightPower / maxMagnitude) * scale, -1.0, 1.0);
 
-                setDrivePowers(frontLeftPower, backLeftPower, frontRightPower, backRightPower);
+                setDrivePowers(frontLeftPower, rearLeftPower, frontRightPower, rearRightPower);
                 if (intake != null) {
                     intake.setPower(intakePower);
                 }
@@ -108,8 +108,8 @@ public class DanceBotTeleOp extends LinearOpMode {
                 telemetry.addData("Strafe", "%.2f", strafe);
                 telemetry.addData("Front Left", "%.2f", frontLeftPower);
                 telemetry.addData("Front Right", "%.2f", frontRightPower);
-                telemetry.addData("Back Left", "%.2f", backLeftPower);
-                telemetry.addData("Back Right", "%.2f", backRightPower);
+                telemetry.addData("Rear Left", "%.2f", rearLeftPower);
+                telemetry.addData("Rear Right", "%.2f", rearRightPower);
                 telemetry.addData("Intake", intake == null ? "Not configured" : String.format("%.2f", intakePower));
                 telemetry.addData("Battery", "%.2f V", batteryVoltage());
                 telemetry.update();
@@ -126,11 +126,11 @@ public class DanceBotTeleOp extends LinearOpMode {
     }
 
     private void setDirections() {
-        frontRight.setDirection(DcMotorSimple.Direction.FORWARD);
+        frontRight.setDirection(DcMotorSimple.Direction.REVERSE);
         frontLeft.setDirection(DcMotorSimple.Direction.FORWARD);
         if (fourMotorDrive) {
-            backLeft.setDirection(DcMotorSimple.Direction.REVERSE);
-            backRight.setDirection(DcMotorSimple.Direction.FORWARD);
+            rearLeft.setDirection(DcMotorSimple.Direction.FORWARD);
+            rearRight.setDirection(DcMotorSimple.Direction.REVERSE);
         }
     }
 
@@ -138,8 +138,8 @@ public class DanceBotTeleOp extends LinearOpMode {
         frontRight.setMode(mode);
         frontLeft.setMode(mode);
         if (fourMotorDrive) {
-            backLeft.setMode(mode);
-            backRight.setMode(mode);
+            rearLeft.setMode(mode);
+            rearRight.setMode(mode);
         }
     }
 
@@ -147,8 +147,8 @@ public class DanceBotTeleOp extends LinearOpMode {
         frontRight.setZeroPowerBehavior(behavior);
         frontLeft.setZeroPowerBehavior(behavior);
         if (fourMotorDrive) {
-            backLeft.setZeroPowerBehavior(behavior);
-            backRight.setZeroPowerBehavior(behavior);
+            rearLeft.setZeroPowerBehavior(behavior);
+            rearRight.setZeroPowerBehavior(behavior);
         }
     }
 
@@ -160,13 +160,13 @@ public class DanceBotTeleOp extends LinearOpMode {
         return Math.copySign((magnitude - STICK_DEAD_ZONE) / (1.0 - STICK_DEAD_ZONE), input);
     }
 
-    private void setDrivePowers(double frontLeftPower, double backLeftPower,
-                                double frontRightPower, double backRightPower) {
+    private void setDrivePowers(double frontLeftPower, double rearLeftPower,
+                                double frontRightPower, double rearRightPower) {
         frontLeft.setPower(frontLeftPower);
         frontRight.setPower(frontRightPower);
         if (fourMotorDrive) {
-            backLeft.setPower(backLeftPower);
-            backRight.setPower(backRightPower);
+            rearLeft.setPower(rearLeftPower);
+            rearRight.setPower(rearRightPower);
         }
     }
 

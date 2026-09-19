@@ -18,20 +18,20 @@ public class DanceBotAuto extends LinearOpMode {
 
     private DcMotor frontRight;
     private DcMotor frontLeft;
-    private DcMotor backLeft;
-    private DcMotor backRight;
+    private DcMotor rearLeft;
+    private DcMotor rearRight;
 
     @Override
     public void runOpMode() {
         frontRight = hardwareMap.get(DcMotor.class, "front_right");
         frontLeft = hardwareMap.get(DcMotor.class, "front_left");
-        backLeft = hardwareMap.get(DcMotor.class, "back_left");
-        backRight = hardwareMap.get(DcMotor.class, "back_right");
+        rearLeft = hardwareMap.get(DcMotor.class, "rear_left");
+        rearRight = hardwareMap.get(DcMotor.class, "rear_right");
 
         setDirections();
         setRunMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
         setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
-        log("Initialized drive map FR=front_right FL=front_left BL=back_left BR=back_right; battery=%.2fV; waiting for start",
+        log("Initialized drive map FR=front_right FL=front_left RL=rear_left RR=rear_right; battery=%.2fV; waiting for start",
                 batteryVoltage());
         telemetry.addData("Status", "Ready");
         telemetry.addData("Battery", "%.2f V", batteryVoltage());
@@ -91,32 +91,32 @@ public class DanceBotAuto extends LinearOpMode {
     }
 
     private void setDirections() {
-        frontRight.setDirection(DcMotorSimple.Direction.FORWARD);
+        frontRight.setDirection(DcMotorSimple.Direction.REVERSE);
         frontLeft.setDirection(DcMotorSimple.Direction.FORWARD);
-        backLeft.setDirection(DcMotorSimple.Direction.REVERSE);
-        backRight.setDirection(DcMotorSimple.Direction.FORWARD);
+        rearLeft.setDirection(DcMotorSimple.Direction.FORWARD);
+        rearRight.setDirection(DcMotorSimple.Direction.REVERSE);
     }
 
     private void setRunMode(DcMotor.RunMode mode) {
         frontRight.setMode(mode);
         frontLeft.setMode(mode);
-        backLeft.setMode(mode);
-        backRight.setMode(mode);
+        rearLeft.setMode(mode);
+        rearRight.setMode(mode);
     }
 
     private void setZeroPowerBehavior(DcMotor.ZeroPowerBehavior behavior) {
         frontRight.setZeroPowerBehavior(behavior);
         frontLeft.setZeroPowerBehavior(behavior);
-        backLeft.setZeroPowerBehavior(behavior);
-        backRight.setZeroPowerBehavior(behavior);
+        rearLeft.setZeroPowerBehavior(behavior);
+        rearRight.setZeroPowerBehavior(behavior);
     }
 
     private void setWheelPowers(double frontRightPower, double frontLeftPower,
-                                double backLeftPower, double backRightPower) {
+                                double rearLeftPower, double rearRightPower) {
         frontRight.setPower(frontRightPower);
         frontLeft.setPower(frontLeftPower);
-        backLeft.setPower(backLeftPower);
-        backRight.setPower(backRightPower);
+        rearLeft.setPower(rearLeftPower);
+        rearRight.setPower(rearRightPower);
     }
 
     private void setDrivePowers(double leftPower, double rightPower) {

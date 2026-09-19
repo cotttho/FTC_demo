@@ -29,16 +29,16 @@ public class DanceBotFieldCentricTeleOp extends LinearOpMode {
 
     private DcMotor frontRight;
     private DcMotor frontLeft;
-    private DcMotor backLeft;
-    private DcMotor backRight;
+    private DcMotor rearLeft;
+    private DcMotor rearRight;
     private DcMotor intake;
     private IMU imu;
 
     @Override
     public void runOpMode() {
         frontRight = hardwareMap.get(DcMotor.class, "front_right");
-        backRight = hardwareMap.get(DcMotor.class, "back_right");
-        backLeft = hardwareMap.get(DcMotor.class, "back_left");
+        rearRight = hardwareMap.get(DcMotor.class, "rear_right");
+        rearLeft = hardwareMap.get(DcMotor.class, "rear_left");
         frontLeft = hardwareMap.get(DcMotor.class, "front_left");
         intake = hardwareMap.tryGet(DcMotor.class, "intake");
         imu = hardwareMap.get(IMU.class, "imu");
@@ -60,7 +60,7 @@ public class DanceBotFieldCentricTeleOp extends LinearOpMode {
         log("Initialized 4-motor field-centric drive; battery=%.2fV", batteryVoltage());
         telemetry.addData("Status", "Ready (4 motors + IMU)");
         telemetry.addData("Drive", "LS: field drive/strafe; RS X: turn; RB: slow");
-        telemetry.addData("Heading", "START: reset field forward");
+        telemetry.addData("Heading", "START / OPTIONS / Y: reset field forward");
         telemetry.addData("Operator", "Gamepad 2 RT: intake; LT: reverse; B: intake stop");
         telemetry.addData("Battery", "%.2f V", batteryVoltage());
         telemetry.update();
@@ -73,12 +73,15 @@ public class DanceBotFieldCentricTeleOp extends LinearOpMode {
         // Treat the direction the robot faces at the start of TeleOp as field forward.
         imu.resetYaw();
         boolean previousResetButton = false;
+        double resetConfirmationUntil = 0.0;
 
         try {
             while (opModeIsActive()) {
-                boolean resetButton = gamepad1.start;
+                boolean resetButton = gamepad1.start || gamepad1.options || gamepad1.y;
                 if (resetButton && !previousResetButton) {
                     imu.resetYaw();
+                    resetConfirmationUntil = getRuntime() + 1.0;
+                    log("Field heading reset from gamepad 1");
                 }
                 previousResetButton = resetButton;
 
@@ -102,18 +105,18 @@ public class DanceBotFieldCentricTeleOp extends LinearOpMode {
 
                 double frontLeftPower = robotForward + robotStrafe + turn;
                 double frontRightPower = robotForward - robotStrafe - turn;
-                double backLeftPower = robotForward - robotStrafe + turn;
-                double backRightPower = robotForward + robotStrafe - turn;
+                double rearLeftPower = robotForward - robotStrafe + turn;
+                double rearRightPower = robotForward + robotStrafe - turn;
 
                 double maxMagnitude = Math.max(1.0,
                         Math.max(Math.max(Math.abs(frontLeftPower), Math.abs(frontRightPower)),
-                                Math.max(Math.abs(backLeftPower), Math.abs(backRightPower))));
+                                Math.max(Math.abs(rearLeftPower), Math.abs(rearRightPower))));
                 frontLeftPower = Range.clip((frontLeftPower / maxMagnitude) * scale, -1.0, 1.0);
                 frontRightPower = Range.clip((frontRightPower / maxMagnitude) * scale, -1.0, 1.0);
-                backLeftPower = Range.clip((backLeftPower / maxMagnitude) * scale, -1.0, 1.0);
-                backRightPower = Range.clip((backRightPower / maxMagnitude) * scale, -1.0, 1.0);
+                rearLeftPower = Range.clip((rearLeftPower / maxMagnitude) * scale, -1.0, 1.0);
+                rearRightPower = Range.clip((rearRightPower / maxMagnitude) * scale, -1.0, 1.0);
 
-                setDrivePowers(frontLeftPower, backLeftPower, frontRightPower, backRightPower);
+                setDrivePowers(frontLeftPower, rearLeftPower, frontRightPower, rearRightPower);
                 if (intake != null) {
                     intake.setPower(intakePower);
                 }
@@ -125,10 +128,14 @@ public class DanceBotFieldCentricTeleOp extends LinearOpMode {
                 telemetry.addData("Robot Forward / Strafe", "%.2f / %.2f", robotForward, robotStrafe);
                 telemetry.addData("Turn", "%.2f", turn);
                 telemetry.addData("Front Left / Right", "%.2f / %.2f", frontLeftPower, frontRightPower);
-                telemetry.addData("Back Left / Right", "%.2f / %.2f", backLeftPower, backRightPower);
+                telemetry.addData("Rear Left / Right", "%.2f / %.2f", rearLeftPower, rearRightPower);
                 telemetry.addData("Intake", intake == null ? "Not configured" : String.format("%.2f", intakePower));
                 telemetry.addData("Battery", "%.2f V", batteryVoltage());
-                telemetry.addLine("Press START to reset field forward");
+                if (getRuntime() < resetConfirmationUntil) {
+                    telemetry.addLine("*** HEADING RESET: current direction is field forward ***");
+                } else {
+                    telemetry.addLine("Press START / OPTIONS / Y to reset field forward");
+                }
                 telemetry.update();
 
                 idle();
@@ -143,24 +150,24 @@ public class DanceBotFieldCentricTeleOp extends LinearOpMode {
     }
 
     private void setDirections() {
-        frontRight.setDirection(DcMotorSimple.Direction.FORWARD);
+        frontRight.setDirection(DcMotorSimple.Direction.REVERSE);
         frontLeft.setDirection(DcMotorSimple.Direction.FORWARD);
-        backLeft.setDirection(DcMotorSimple.Direction.REVERSE);
-        backRight.setDirection(DcMotorSimple.Direction.FORWARD);
+        rearLeft.setDirection(DcMotorSimple.Direction.FORWARD);
+        rearRight.setDirection(DcMotorSimple.Direction.REVERSE);
     }
 
     private void setRunMode(DcMotor.RunMode mode) {
         frontRight.setMode(mode);
         frontLeft.setMode(mode);
-        backLeft.setMode(mode);
-        backRight.setMode(mode);
+        rearLeft.setMode(mode);
+        rearRight.setMode(mode);
     }
 
     private void setZeroPowerBehavior(DcMotor.ZeroPowerBehavior behavior) {
         frontRight.setZeroPowerBehavior(behavior);
         frontLeft.setZeroPowerBehavior(behavior);
-        backLeft.setZeroPowerBehavior(behavior);
-        backRight.setZeroPowerBehavior(behavior);
+        rearLeft.setZeroPowerBehavior(behavior);
+        rearRight.setZeroPowerBehavior(behavior);
     }
 
     private double applyDeadZone(double input) {
@@ -171,12 +178,12 @@ public class DanceBotFieldCentricTeleOp extends LinearOpMode {
         return Math.copySign((magnitude - STICK_DEAD_ZONE) / (1.0 - STICK_DEAD_ZONE), input);
     }
 
-    private void setDrivePowers(double frontLeftPower, double backLeftPower,
-                                double frontRightPower, double backRightPower) {
+    private void setDrivePowers(double frontLeftPower, double rearLeftPower,
+                                double frontRightPower, double rearRightPower) {
         frontLeft.setPower(frontLeftPower);
-        backLeft.setPower(backLeftPower);
+        rearLeft.setPower(rearLeftPower);
         frontRight.setPower(frontRightPower);
-        backRight.setPower(backRightPower);
+        rearRight.setPower(rearRightPower);
     }
 
     private void stopMotors() {
